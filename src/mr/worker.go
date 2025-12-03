@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
@@ -40,43 +39,23 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	for {
-		args := ArgsGetTask{}
-		args.WorkerID = -1
-		reply := ReplyGetTask{}
-		ok := call("Coordinator.GetTask", &args, &reply)
-		if ok {
-			switch reply.TaskType {
-			case 0:
-				fmt.Printf("Received Map Task: %s, MapTaskID: %d\n", reply.Filename, reply.MapTaskID)
-			case 1:
-				fmt.Printf("Received Reduce Task: ReduceTaskID: %d\n", reply.ReduceTaskID)
-			case 2:
-				fmt.Printf("Received Wait Task\n")
-			case 3:
-				fmt.Printf("Received Exit Task\n")
-			}
-
-		} else {
-			fmt.Printf("call failed!\n")
-			return
+		task, ok := getTask()
+		if !ok {
+			log.Fatalf("get task failed")
 		}
+		switch task.TaskType {
+		case MapTask:
+			doMapTask(mapf, task.Content.Filename, task.ID, task.Content.NReduce)
+			reportTaskDone(MapTask, task.ID)
+		case ReduceTask:
+			doReduceTask(reducef, task.ID)
+			reportTaskDone(ReduceTask, task.ID)
 
-		switch reply.TaskType {
-		case 0:
-			doMapTask(mapf, reply.Filename, reply.MapTaskID, reply.NReduce)
-
-		case 1:
-			doReduceTask(reducef, reply.ReduceTaskID)
-
-		case 2:
-			// Wait task: do nothing, just return
+		case WaitTask:
 			time.Sleep(1 * time.Second)
-		case 3:
-			// Exit task: log and return
-			log.Printf("Worker %d: No task assigned, exiting.", args.WorkerID)
+		case ExitTask:
 			return
 		}
-
 	}
 	// Your worker implementation here.
 
@@ -133,100 +112,110 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
+func getTask() (*Task, bool) {
+	args := ArgsGetTask{}
+	task := Task{}
+	ok := call("Coordinator.GetTask", &args, &task)
+	if ok {
+		switch task.TaskType {
+		case MapTask:
+			log.Printf("Received Map Task, MapTaskID: %d\n", task.ID)
+		case ReduceTask:
+			log.Printf("Received Reduce Task, ReduceTaskID: %d\n", task.ID)
+		case WaitTask:
+			log.Printf("Received Wait Task\n")
+		case ExitTask:
+			log.Printf("Received Exit Task\n")
+		}
+		return &task, true
+
+	} else {
+		return nil, false
+	}
+}
+
 func doMapTask(mapf func(string, string) []KeyValue, filename string, mapTaskID int, nReduce int) {
-	// Your code here.
-	file, err := os.Open(filename)
+
+	content, err := os.ReadFile(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Fatalf("read file %s failed: %v", filename, err)
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
+	// map
 	intermediate := mapf(filename, string(content))
 
-	// 1. 定义文件列表切片：存储所有创建的 tempFile（*os.File 类型）
+	// create temp files for storing intermediate results
 	var openFiles []*os.File
 
-	// 3. 循环创建临时文件，加入列表
-	for i := 0; i < nReduce; i++ {
-		// 自定义的文件名（仅用于标识，实际文件是 os.CreateTemp 生成的临时文件）
-
-		// 创建临时文件：存放目录 "tmp"，前缀 "mr-"
+	for range nReduce {
 		tempFile, err := os.CreateTemp("", "mr-")
 		if err != nil {
-			// 错误处理：打印真实错误+自定义文件名，方便排查
-			log.Fatalf("创建临时文件失败 (%s): %v", tempFile.Name(), err)
+			log.Fatalf("create temp file failed: %v", err)
 		}
-
-		// 关键：将创建的 tempFile 追加到文件列表
 		openFiles = append(openFiles, tempFile)
 
 	}
 
 	defer func() {
 		for i, file := range openFiles {
-			// 先关闭文件（释放资源，确保数据写入完成）
-			if err := file.Close(); err != nil {
-				log.Printf("关闭文件 %s 失败：%v", file.Name(), err)
+			err := file.Close()
+			if err != nil {
+				log.Fatalf("close file %s failed: %v", file.Name(), err)
 			}
 			intermediateFilename := "mr-" + strconv.Itoa(mapTaskID) + "-" + strconv.Itoa(i)
-			os.Rename(file.Name(), intermediateFilename)
+			err = os.Rename(file.Name(), intermediateFilename)
+			if err != nil {
+				log.Fatalf("rename file %s failed: %v", file.Name(), err)
+			}
 		}
 	}()
 
 	sort.Sort(ByKey(intermediate))
-	i := 0
 
+	// encode intermediate results to temp files
+	i := 0
 	for i < len(intermediate) {
-		j := i
+		j := i + 1
 		reduceTaskID := ihash(intermediate[i].Key) % nReduce
 		tempFile := openFiles[reduceTaskID]
 		enc := json.NewEncoder(tempFile)
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			err := enc.Encode(&intermediate[j])
-			if err != nil {
-				log.Fatalf("cannot encode %v", intermediate[j])
-			}
-			// log.Printf("临时文件真实路径：%s", tempFile.Name())
-
 			j++
+		}
+		for k := i; k < j; k++ {
+			err := enc.Encode(&intermediate[k])
+			if err != nil {
+				log.Fatalf("encode %v failed: %v", intermediate[k], err)
+			}
 		}
 		i = j
 	}
 }
 
 func doReduceTask(reducef func(string, []string) string, reduceTaskID int) {
-	// Your code here.
 
-	suffixStr := strconv.Itoa(reduceTaskID) // 转换为字符串，方便匹配
-
-	// 1. 读取 tmp 目录（单层，不递归）
+	suffixStr := strconv.Itoa(reduceTaskID)
 	entries, err := os.ReadDir("./")
 	if err != nil {
-		log.Fatalf("读取目录 %s 失败：%v", "", err)
+		log.Fatalf("read working directory failed: %v", err)
 		return
 	}
 
-	// 2. 遍历目录，筛选后缀为 targetSuffix 的文件
+	// traverse working directory, filter intermediate files with reduce task id
 	var keyValues []KeyValue
 	for _, entry := range entries {
-		// 跳过目录，只处理文件
+
 		if entry.IsDir() {
 			continue
 		}
 
 		filename := entry.Name()
-		// 按 "-" 分割文件名，判断最后一段是否为目标后缀
 		parts := strings.Split(filename, "-")
-		// 文件名格式需满足 "xxx-xxx-i"（至少 3 段，最后一段是数字）
+		// filename format should be "xxx-xxx-i" (at least 3 parts, the last part is a number)
 		if len(parts) >= 3 && parts[len(parts)-1] == suffixStr {
-			// 拼接完整路径（避免相对路径歧义）
 
 			file, err := os.Open(filename)
 			if err != nil {
-				log.Fatalf("无法打开文件 %s: %v", filename, err)
+				log.Fatalf("open file %s failed: %v", filename, err)
 			}
 
 			dec := json.NewDecoder(file)
@@ -237,12 +226,33 @@ func doReduceTask(reducef func(string, []string) string, reduceTaskID int) {
 				}
 				keyValues = append(keyValues, kv)
 			}
+			err = file.Close()
+			if err != nil {
+				log.Fatalf("close file %s failed: %v", filename, err)
+			}
 		}
 	}
 	sort.Sort(ByKey(keyValues))
 
+	// create temp file for storing final results
+	ofile, err := os.CreateTemp("", "mr-out-")
+	if err != nil {
+		log.Fatalf("create temp file failed: %v", err)
+	}
+	defer func() {
+		err := ofile.Close()
+		if err != nil {
+			log.Fatalf("close file %s failed: %v", ofile.Name(), err)
+		}
+		finalName := "mr-out-" + suffixStr
+		err = os.Rename(ofile.Name(), finalName)
+		if err != nil {
+			log.Fatalf("rename file %s failed: %v", ofile.Name(), err)
+		}
+	}()
+
+	// reduce
 	i := 0
-	ofile, _ := os.CreateTemp("", "mr-out-")
 	for i < len(keyValues) {
 		j := i + 1
 		for j < len(keyValues) && keyValues[j].Key == keyValues[i].Key {
@@ -258,12 +268,12 @@ func doReduceTask(reducef func(string, []string) string, reduceTaskID int) {
 		fmt.Fprintf(ofile, "%v %v\n", keyValues[i].Key, output)
 		i = j
 	}
-	ofile.Close()
-	finalName := "mr-out-" + suffixStr
-	os.Rename(ofile.Name(), finalName)
+
 }
 
-func done() bool {
-
-	return false
+func reportTaskDone(taskType TaskType, taskID int) bool {
+	return call("Coordinator.ReportTaskDone", &ArgsReportTaskDone{
+		TaskType: taskType,
+		TaskID:   taskID,
+	}, &ReplyGetTask{})
 }

@@ -25,21 +25,31 @@ type ExampleReply struct {
 }
 
 type ArgsGetTask struct {
-	WorkerID int
 }
+
+type TaskType int
+
+const (
+	MapTask    TaskType = 0
+	ReduceTask TaskType = 1
+	WaitTask   TaskType = 2
+	ExitTask   TaskType = 3
+)
 
 type ReplyGetTask struct {
 	Filename     string
 	MapTaskID    int
 	ReduceTaskID int
-	TaskType     int // 0: map task; 1: reduce task; 2: wait; 3: exit
+	TaskType     TaskType
 	NReduce      int
 }
 
 type ArgsReportTaskDone struct {
-	WorkerID int
-	TaskType int // 0: map task; 1: reduce task
+	TaskType TaskType
 	TaskID   int // MapTaskID or ReduceTaskID
+}
+
+type ReplyReportTaskDone struct {
 }
 
 // Add your RPC definitions here.

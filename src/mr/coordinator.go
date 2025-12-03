@@ -69,10 +69,12 @@ func (c *Coordinator) GetTask(args *ArgsGetTask, reply *Task) error {
 			c.taskQueue[c.nextTaskID].AssignTime = time.Now()
 			c.taskQueue[c.nextTaskID].Status = TaskRunning
 			*reply = *c.taskQueue[c.nextTaskID]
+			log.Printf("assigned task type %d, task id %d, worker id %d\n", c.taskQueue[c.nextTaskID].TaskType, c.nextTaskID, args.WorkerID)
 			return nil
 		}
 		c.nextTaskID++
 	}
+	c.nextTaskID = 0
 	reply.TaskType = WaitTask
 	return nil
 }
@@ -85,6 +87,7 @@ func (c *Coordinator) ReportTaskDone(args *ArgsReportTaskDone, reply *ReplyRepor
 	case MapTask:
 		if c.taskQueue[args.TaskID].Status == TaskRunning {
 			c.finishedMapTaskCount++
+			log.Printf("finished map task %d\n", args.TaskID)
 			if c.finishedMapTaskCount == len(c.taskQueue) {
 				c.init_reduce_task()
 				return nil
@@ -93,6 +96,7 @@ func (c *Coordinator) ReportTaskDone(args *ArgsReportTaskDone, reply *ReplyRepor
 	case ReduceTask:
 		if c.taskQueue[args.TaskID].Status == TaskRunning {
 			c.finishedReduceTaskCount++
+			log.Printf("finished reduce task %d\n", args.TaskID)
 		}
 	}
 	c.taskQueue[args.TaskID].Status = TaskCompleted

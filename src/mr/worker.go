@@ -39,7 +39,7 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	for {
-		task, ok := getTask()
+		task, ok := getTask(os.Getpid())
 		if !ok {
 			log.Fatalf("get task failed")
 		}
@@ -112,16 +112,18 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-func getTask() (*Task, bool) {
-	args := ArgsGetTask{}
+func getTask(workerID int) (*Task, bool) {
+	args := ArgsGetTask{
+		WorkerID: workerID,
+	}
 	task := Task{}
 	ok := call("Coordinator.GetTask", &args, &task)
 	if ok {
 		switch task.TaskType {
 		case MapTask:
-			log.Printf("Received Map Task, MapTaskID: %d\n", task.ID)
+			log.Printf("Received Map Task, MapTaskID: %d, WorkerID: %d\n", task.ID, workerID)
 		case ReduceTask:
-			log.Printf("Received Reduce Task, ReduceTaskID: %d\n", task.ID)
+			log.Printf("Received Reduce Task, ReduceTaskID: %d, WorkerID: %d\n", task.ID, workerID)
 		case WaitTask:
 			log.Printf("Received Wait Task\n")
 		case ExitTask:

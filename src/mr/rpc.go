@@ -25,6 +25,7 @@ type ExampleReply struct {
 }
 
 type ArgsGetTask struct {
+	WorkerID int
 }
 
 type TaskType int

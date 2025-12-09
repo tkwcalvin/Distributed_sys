@@ -122,6 +122,8 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	ret := false
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// Your code here.
 	if c.finishedReduceTaskCount == c.nReduce {
 		ret = true

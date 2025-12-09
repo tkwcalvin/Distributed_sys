@@ -147,6 +147,7 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, mapTaskID 
 
 	// create temp files for storing intermediate results
 	var openFiles []*os.File
+	var encoders []*json.Encoder
 
 	for range nReduce {
 		tempFile, err := os.CreateTemp("", "mr-")
@@ -154,7 +155,7 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, mapTaskID 
 			log.Fatalf("create temp file failed: %v", err)
 		}
 		openFiles = append(openFiles, tempFile)
-
+		encoders = append(encoders, json.NewEncoder(tempFile))
 	}
 
 	defer func() {
@@ -171,25 +172,14 @@ func doMapTask(mapf func(string, string) []KeyValue, filename string, mapTaskID 
 		}
 	}()
 
-	sort.Sort(ByKey(intermediate))
-
 	// encode intermediate results to temp files
-	i := 0
-	for i < len(intermediate) {
-		j := i + 1
+
+	for i := range len(intermediate) {
 		reduceTaskID := ihash(intermediate[i].Key) % nReduce
-		tempFile := openFiles[reduceTaskID]
-		enc := json.NewEncoder(tempFile)
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
+		err := encoders[reduceTaskID].Encode(&intermediate[i])
+		if err != nil {
+			log.Fatalf("encode %v failed: %v", intermediate[i], err)
 		}
-		for k := i; k < j; k++ {
-			err := enc.Encode(&intermediate[k])
-			if err != nil {
-				log.Fatalf("encode %v failed: %v", intermediate[k], err)
-			}
-		}
-		i = j
 	}
 }
 
@@ -234,6 +224,7 @@ func doReduceTask(reducef func(string, []string) string, reduceTaskID int) {
 			}
 		}
 	}
+	// sort keyValues by key
 	sort.Sort(ByKey(keyValues))
 
 	// create temp file for storing final results

@@ -1,5 +1,13 @@
 package rpc
 
+import (
+	"fmt"
+	"log"
+	"net/rpc"
+	"os"
+	"strconv"
+)
+
 type Err string
 
 const (
@@ -38,3 +46,26 @@ type GetReply struct {
 	Err     Err
 }
 
+func SocketName() string {
+	s := "/var/tmp/5840-kvsrv1-"
+	s += strconv.Itoa(os.Getuid())
+	return s
+}
+
+func Call(rpcname string, args interface{}, reply interface{}) bool {
+	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	sockname := SocketName()
+	c, err := rpc.DialHTTP("unix", sockname)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+	defer c.Close()
+
+	err = c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	fmt.Println(err)
+	return false
+}

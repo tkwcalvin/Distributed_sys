@@ -3,6 +3,8 @@ package kvsrv
 import (
 	"log"
 
+	netrpc "net/rpc"
+
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	tester "6.5840/tester1"
@@ -33,7 +35,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
 	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
-	ok := rpc.Call("KVServer.Get", &args, &reply)
+	ok := Call("KVServer.Get", &args, &reply)
 	if !ok {
 		log.Println("Get call failed")
 		return "", 0, rpc.ErrMaybe
@@ -64,7 +66,7 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
 	reply := rpc.PutReply{}
-	ok := rpc.Call("KVServer.Put", &args, &reply)
+	ok := Call("KVServer.Put", &args, &reply)
 	if !ok {
 		log.Println("Put call failed")
 		return rpc.ErrMaybe
@@ -72,4 +74,22 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	log.Println("Put reply:", reply.Err)
 
 	return reply.Err
+}
+
+func Call(rpcname string, args interface{}, reply interface{}) bool {
+	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	sockname := rpc.SocketName()
+	c, err := netrpc.DialHTTP("unix", sockname)
+	if err != nil {
+		log.Fatal("dialing:", err)
+	}
+	defer c.Close()
+
+	err = c.Call(rpcname, args, reply)
+	if err == nil {
+		return true
+	}
+
+	log.Println(err)
+	return false
 }

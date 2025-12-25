@@ -47,7 +47,11 @@ func MakeKVServer() *KVServer {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	go func() {
+		if err := http.Serve(l, nil); err != nil {
+			log.Fatal("http serve error:", err)
+		}
+	}()
 
 	kv.db = make(map[string]*Entry)
 	return kv
@@ -62,6 +66,7 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) error {
 	entry, ok := kv.db[args.Key]
 	if !ok {
 		reply.Err = rpc.ErrNoKey
+		reply.Version = 0
 		return nil
 	}
 	reply.Value = entry.Value

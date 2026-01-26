@@ -73,6 +73,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	var term int
 	var isleader bool
@@ -176,8 +178,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			rf.lastHeartbeatTime = time.Now()
-			rf.currentTerm = args.Term
-			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
 			log.Printf("[Term %d] server %d votes for %d", rf.currentTerm, rf.me, args.CandidateId)
@@ -243,11 +243,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.killed() == false {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
+		reply.Term = rf.currentTerm
+		reply.Success = false
 		if args.Entries == nil {
 			if args.Term < rf.currentTerm {
 				// Outdated term, reply false and keep the current term
-				reply.Term = rf.currentTerm
-				reply.Success = false
 				log.Printf("[Term %d] server %d receives heartbeat from %d, reply: %v", rf.currentTerm, rf.me, args.LeaderId, reply)
 				return
 			}
@@ -255,12 +255,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				// See updateTerm, become Follower for the new term
 				rf.becomeFollower(args.Term)
 				reply.Success = true
-				reply.Term = args.Term
+				reply.Term = rf.currentTerm
 				return
-
 			}
 			// Heartbeat, reply true and keep the current term
-			reply.Term = rf.currentTerm
 			reply.Success = true
 			rf.lastHeartbeatTime = time.Now()
 
@@ -379,141 +377,286 @@ func (rf *Raft) becomeLeader() {
 	log.Printf("[Term %d] server %d becomes Leader", rf.currentTerm, rf.me)
 }
 
+// StateSnapshot contains the state snapshot needed for RPC operations
+type StateSnapshot struct {
+	CurrentTerm  int
+	Me           int
+	CommitIndex  int
+	LastLogIndex int
+	LastLogTerm  int
+	PrevLogTerm  int
+}
+
+// getStateSnapshot creates a snapshot of the current state.
+// Caller must hold rf.mu lock before calling this function.
+func (rf *Raft) getStateSnapshot() StateSnapshot {
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := 0
+	prevLogTerm := 0
+	if lastLogIndex >= 0 {
+		lastLogTerm = rf.log[lastLogIndex].Term
+		prevLogTerm = lastLogTerm
+	}
+
+	return StateSnapshot{
+		CurrentTerm:  rf.currentTerm,
+		Me:           rf.me,
+		CommitIndex:  rf.commitIndex,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+		PrevLogTerm:  prevLogTerm,
+	}
+}
+
 // sendHeartbeats is called when this server is leader; it sends
 // periodic AppendEntries (heartbeats) to all other peers.
-func (rf *Raft) sendHeartbeats() {
-	rf.mu.Lock()
-	currentTerm := rf.currentTerm
-	me := rf.me
-	commitIndex := rf.commitIndex
-	rf.mu.Unlock()
+func (rf *Raft) sendHeartbeats(snapshot StateSnapshot) {
 
+	peerCount := len(rf.peers) - 1 // Exclude self
+	replyCh := make(chan *AppendEntriesReply, peerCount)
+	stopCh := make(chan struct{}) // Channel to signal stop processing replies
+	var once sync.Once
+
+	// Start goroutines to send RPCs to all peers asynchronously
 	for peer := range rf.peers {
-		if peer == me {
+		if peer == snapshot.Me {
 			continue
 		}
 
 		go func(server int) {
-			rf.mu.Lock()
-			if rf.state != Leader {
-				rf.mu.Unlock()
+			// Check if we should stop before sending
+			select {
+			case <-stopCh:
 				return
+			default:
 			}
 
-			prevLogIndex := rf.nextIndex[server] - 1
-			prevLogTerm := 0
-			if prevLogIndex >= 0 && prevLogIndex < len(rf.log) {
-				prevLogTerm = rf.log[prevLogIndex].Term
-			}
-
+			// For heartbeat, use last log index as prevLogIndex
 			args := &AppendEntriesArgs{
-				Term:         currentTerm,
-				LeaderId:     me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				LeaderCommit: commitIndex,
+				Term:         snapshot.CurrentTerm,
+				LeaderId:     snapshot.Me,
+				PrevLogIndex: snapshot.LastLogIndex,
+				PrevLogTerm:  snapshot.PrevLogTerm,
+				LeaderCommit: snapshot.CommitIndex,
 			}
-			rf.mu.Unlock()
 
 			reply := &AppendEntriesReply{}
-			log.Printf("[Term %d] leader %d sends AppendEntries to %d", currentTerm, me, server)
+			log.Printf("[Term %d] leader %d sends AppendEntries to %d", snapshot.CurrentTerm, snapshot.Me, server)
 			ok := rf.sendAppendEntries(server, args, reply)
 
-			if ok {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if reply.Term > rf.currentTerm {
-					rf.becomeFollower(reply.Term)
+			// Check if we should stop processing before sending reply
+			select {
+			case <-stopCh:
+				// Stop channel closed, don't send reply
+				return
+			default:
+				if ok {
+					replyCh <- reply
+				} else {
+					replyCh <- nil
 				}
 			}
 		}(peer)
 	}
+
+	// Process replies asynchronously
+	go func() {
+		for {
+			select {
+			case reply := <-replyCh:
+				if reply == nil {
+					continue
+				}
+
+				// If reply has higher term, stop processing and convert to follower
+				if reply.Term > snapshot.CurrentTerm {
+					// Close stop channel to prevent other goroutines from sending more replies
+					once.Do(func() {
+						close(stopCh)
+					})
+
+					// Acquire lock and convert to follower
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.becomeFollower(reply.Term)
+					}
+					rf.mu.Unlock()
+
+					// Drain remaining replies and exit
+					for {
+						select {
+						case <-replyCh:
+							// Drain
+						default:
+							return
+						}
+					}
+				}
+
+			case <-stopCh:
+				// Stop processing, exit
+				return
+			}
+		}
+	}()
 }
 
 // startElection is called by a follower/candidate when the election
 // timeout elapses and it should try to become leader.
-func (rf *Raft) startElection() {
-
-	rf.mu.Lock()
-	// Convert to candidate and start a new term
-	rf.becomeCandidate()
-
-	// Prepare vote arguments
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := 0
-	if lastLogIndex >= 0 {
-		lastLogTerm = rf.log[lastLogIndex].Term
-	}
-	term := rf.currentTerm
-	candidateId := rf.me
-	rf.mu.Unlock()
-
-	// Concurrently send RequestVote to all other peers using channel
-	votesReceived := 1 // Count self vote
+func (rf *Raft) startElection(snapshot StateSnapshot) {
+	peerCount := len(rf.peers) - 1 // Exclude self
 	majority := (len(rf.peers))/2 + 1
-	voteCh := make(chan *RequestVoteReply, len(rf.peers))
+	voteCh := make(chan *RequestVoteReply, peerCount)
+	stopCh := make(chan struct{}) // Channel to signal stop processing replies
+	var once sync.Once
+	votesReceived := 1 // Count self vote
 
-	// Launch goroutines to send RequestVote to all peers
+	// Start goroutines to send RequestVote to all peers asynchronously
 	for peer := range rf.peers {
-		if peer == rf.me {
+		if peer == snapshot.Me {
 			continue
 		}
 
 		go func(server int) {
+			// Check if we should stop before sending
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+
 			args := &RequestVoteArgs{
-				Term:         term,
-				CandidateId:  candidateId,
-				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastLogTerm,
+				Term:         snapshot.CurrentTerm,
+				CandidateId:  snapshot.Me,
+				LastLogIndex: snapshot.LastLogIndex,
+				LastLogTerm:  snapshot.LastLogTerm,
 			}
 			reply := &RequestVoteReply{}
 
 			ok := rf.sendRequestVote(server, args, reply)
 
-			if ok {
-				log.Printf("[Term %d] server %d sent RequestVote to %d, get reply: %v", term, rf.me, server, reply)
-				voteCh <- reply
-			} else {
-				// Send nil to indicate failure, so main loop can continue
-				log.Printf("[Term %d] server %d sent RequestVote to %d, failed", term, rf.me, server)
-
-				voteCh <- nil
+			// Check if we should stop processing before sending reply
+			select {
+			case <-stopCh:
+				// Stop channel closed, don't send reply
+				return
+			default:
+				if ok {
+					log.Printf("[Term %d] server %d sent RequestVote to %d, get reply: %v", snapshot.CurrentTerm, snapshot.Me, server, reply)
+					voteCh <- reply
+				} else {
+					log.Printf("[Term %d] server %d sent RequestVote to %d, failed", snapshot.CurrentTerm, snapshot.Me, server)
+					voteCh <- nil
+				}
 			}
 		}(peer)
 	}
 
-	// Collect votes from channel - use fixed count to avoid blocking forever
-	for i := 0; i < len(rf.peers)-1; i++ {
-		reply := <-voteCh
-		if reply == nil {
-			continue
-		}
+	// Process replies asynchronously with countdown timer
+	electionTimeout := 500 * time.Millisecond
+	timer := time.NewTimer(electionTimeout)
+	defer timer.Stop()
 
-		rf.mu.Lock()
-		// If reply has higher term, convert to follower
-		if reply.Term > rf.currentTerm {
-			rf.becomeFollower(reply.Term)
-			rf.mu.Unlock()
-			return
-		}
+	go func() {
+		for {
+			select {
+			case reply := <-voteCh:
+				if reply == nil {
+					continue
+				}
 
-		// Only count votes for current term
-		if reply.VoteGranted && rf.state == Candidate && rf.currentTerm == term {
-			votesReceived++
-			if votesReceived >= majority {
-				// Become leader and initialize leader state
-				rf.becomeLeader()
-				log.Printf("Candidate %d becomes leader", rf.me)
+				// If reply has higher term, stop processing and convert to follower
+				if reply.Term > snapshot.CurrentTerm {
+					// Close stop channel to prevent other goroutines from sending more replies
+					once.Do(func() {
+						close(stopCh)
+						timer.Stop()
+					})
+
+					// Acquire lock and convert to follower
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.becomeFollower(reply.Term)
+					}
+					rf.mu.Unlock()
+
+					// Drain remaining replies and exit
+					for {
+						select {
+						case <-voteCh:
+							// Drain
+						default:
+							return
+						}
+					}
+				}
+
+				// Only count votes for current term
+				rf.mu.Lock()
+				if reply.VoteGranted && rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
+					votesReceived++
+					if votesReceived >= majority {
+						// Become leader and initialize leader state
+						rf.becomeLeader()
+						log.Printf("Candidate %d becomes leader", snapshot.Me)
+						rf.mu.Unlock()
+
+						// Close stop channel and stop timer
+						once.Do(func() {
+							close(stopCh)
+							timer.Stop()
+						})
+
+						// Drain remaining replies and exit
+						for {
+							select {
+							case <-voteCh:
+								// Drain
+							default:
+								return
+							}
+						}
+					}
+				}
 				rf.mu.Unlock()
+
+			case <-timer.C:
+				// Countdown expired: election failed, convert back to follower
+				once.Do(func() {
+					close(stopCh)
+				})
+
+				rf.mu.Lock()
+				if rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
+					// Check one more time if we have enough votes
+					if votesReceived >= majority {
+						rf.becomeLeader()
+						log.Printf("Candidate %d becomes leader (after timeout)", snapshot.Me)
+					} else {
+						// Election failed, convert back to follower
+						rf.state = Follower
+						rf.lastHeartbeatTime = time.Now()
+						log.Printf("Candidate %d does not become leader (timeout), reverting to follower", snapshot.Me)
+					}
+				}
+				rf.mu.Unlock()
+
+				// Drain remaining replies and exit
+				for {
+					select {
+					case <-voteCh:
+						// Drain
+					default:
+						return
+					}
+				}
+
+			case <-stopCh:
+				// Stop processing, exit
 				return
 			}
 		}
-		rf.mu.Unlock()
-	}
-	log.Printf("Candidate %d does not become leader", rf.me)
-	rf.mu.Lock()
-	rf.lastHeartbeatTime = time.Now()
-	rf.mu.Unlock()
+	}()
 }
 
 // ticker runs in a loop and either sends heartbeats (if leader)
@@ -524,16 +667,26 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		state := rf.state
 		lastHeartbeat := rf.lastHeartbeatTime
-		rf.mu.Unlock()
 
 		if state == Leader {
-			rf.sendHeartbeats()
+			// Create snapshot while holding lock
+			snapshot := rf.getStateSnapshot()
+			rf.mu.Unlock()
+
+			rf.sendHeartbeats(snapshot) // sendHeartbeats uses snapshot, doesn't need lock
 			// Heartbeat interval (e.g., 100ms)
 			time.Sleep(100 * time.Millisecond)
 		} else {
 			// Follower/Candidate checks for election timeout
 			if time.Now().After(lastHeartbeat.Add(ElectionTimeout)) {
-				rf.startElection()
+				rf.becomeCandidate()
+				// Create snapshot while holding lock
+				snapshot := rf.getStateSnapshot()
+				rf.mu.Unlock()
+
+				rf.startElection(snapshot) // startElection uses snapshot, doesn't need lock
+			} else {
+				rf.mu.Unlock()
 			}
 
 			// pause for a random amount of time between 50 and 350

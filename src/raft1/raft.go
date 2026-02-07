@@ -680,7 +680,8 @@ func (rf *Raft) ticker() {
 			// Follower/Candidate checks for election timeout
 			if time.Now().After(lastHeartbeat.Add(ElectionTimeout)) {
 				rf.becomeCandidate()
-				// Create snapshot while holding lock
+				rf.mu.Unlock()
+				// Get fresh snapshot after becoming candidate (term has changed)
 				snapshot := rf.getStateSnapshot()
 				rf.mu.Unlock()
 

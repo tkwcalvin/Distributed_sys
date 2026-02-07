@@ -15,6 +15,7 @@ import (
 
 	"log"
 	//	"6.5840/labgob"
+
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -35,7 +36,7 @@ const (
 
 // Election timeout
 const (
-	ElectionTimeout = 500 * time.Millisecond
+	HeartbeatTimeout = 250 * time.Millisecond
 )
 
 // A Go object implementing a single Raft peer.
@@ -245,26 +246,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		defer rf.mu.Unlock()
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		if args.Entries == nil {
-			if args.Term < rf.currentTerm {
-				// Outdated term, reply false and keep the current term
-				log.Printf("[Term %d] server %d receives heartbeat from %d, reply: %v", rf.currentTerm, rf.me, args.LeaderId, reply)
-				return
-			}
-			if args.Term > rf.currentTerm {
-				// See updateTerm, become Follower for the new term
-				rf.becomeFollower(args.Term)
-				reply.Success = true
-				reply.Term = rf.currentTerm
-				return
-			}
-			// Heartbeat, reply true and keep the current term
-			reply.Success = true
-			rf.lastHeartbeatTime = time.Now()
 
-			log.Printf("[Term %d] server %d receives heartbeat from %d, reply: %v", rf.currentTerm, rf.me, args.LeaderId, reply)
+		if args.Term < rf.currentTerm {
+			// Outdated term, reply false and keep the current term
+			log.Printf("[Term %d] server %d receives entries from %d, reply: %v", rf.currentTerm, rf.me, args.LeaderId, reply)
 			return
 		}
+		if args.Term > rf.currentTerm {
+			// See updateTerm, become Follower for the new term
+			rf.becomeFollower(args.Term)
+		}
+
+		// return false if prevLogIndex is out of range or
+		// prevLogTerm is not the same as the term of the log entry at prevLogIndex
+		if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			return
+		}
+
+		// append new entries to the log
+
+		for i, entry := range args.Entries {
+			// if the log is out of range, append the new entries
+			newIndex := args.PrevLogIndex + i + 1
+			if newIndex > len(rf.log)-1 {
+				rf.log = append(rf.log, args.Entries[i:]...)
+				break
+			}
+			// if the term is not the same, append the new entries
+			if rf.log[newIndex].Term != entry.Term {
+				rf.log = append(rf.log[:newIndex], args.Entries[i:]...)
+				break
+			}
+		}
+
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		}
+
+		rf.lastHeartbeatTime = time.Now()
+		reply.Success = true
+		reply.Term = rf.currentTerm
+		// print the log
+		log.Printf("[Term %d] server %d receives entries from %d, log: %v", rf.currentTerm, rf.me, args.LeaderId, rf.log)
+		return
 	}
 }
 
@@ -319,6 +345,76 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	entry := LogEntry{Command: command, Term: term}
+
+	rf.mu.Lock()
+	rf.log = append(rf.log, entry)
+	index = len(rf.log) - 1
+	rf.mu.Unlock()
+
+	once := sync.Once{}
+
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go func(server int) {
+			for {
+
+				rf.mu.Lock()
+				nextIndex := rf.nextIndex[server]
+				args := &AppendEntriesArgs{
+					Term:         term,
+					LeaderId:     rf.me,
+					PrevLogIndex: nextIndex - 1,
+					PrevLogTerm:  rf.log[nextIndex-1].Term,
+					Entries:      rf.log[nextIndex:],
+					LeaderCommit: rf.commitIndex,
+				}
+				rf.mu.Unlock()
+				reply := &AppendEntriesReply{}
+				ok := rf.sendAppendEntries(server, args, reply)
+				if !ok {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+
+				if reply.Term > term {
+					once.Do(func() {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
+						if rf.currentTerm == term && rf.state == Leader {
+							rf.becomeFollower(reply.Term)
+						}
+					})
+					return
+				}
+
+				if reply.Success {
+					rf.mu.Lock()
+					rf.nextIndex[server] = len(rf.log)
+					rf.matchIndex[server] = max(len(rf.log)-1, rf.matchIndex[server])
+					rf.mu.Unlock()
+					return
+				}
+
+				// if the follower does not contain the entry matching prevLogIndex and prevLogTerm
+				// decrement the nextIndex and try again
+				rf.mu.Lock()
+				if rf.nextIndex[server] == nextIndex {
+					rf.nextIndex[server]--
+				}
+				rf.mu.Unlock()
+			}
+
+		}(server)
+	}
+
 	return index, term, isLeader
 }
 
@@ -346,6 +442,7 @@ func (rf *Raft) killed() bool {
 
 // becomeFollower transitions this server to follower state with the given term.
 func (rf *Raft) becomeFollower(term int) {
+
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -366,6 +463,7 @@ func (rf *Raft) becomeCandidate() {
 
 // becomeLeader transitions this server to leader state and initializes leader volatile state.
 func (rf *Raft) becomeLeader() {
+
 	rf.state = Leader
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -414,90 +512,58 @@ func (rf *Raft) sendHeartbeats(snapshot StateSnapshot) {
 
 	peerCount := len(rf.peers) - 1 // Exclude self
 	replyCh := make(chan *AppendEntriesReply, peerCount)
-	stopCh := make(chan struct{}) // Channel to signal stop processing replies
-	var once sync.Once
-
+	args := &AppendEntriesArgs{
+		Term:         snapshot.CurrentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: snapshot.LastLogIndex,
+		PrevLogTerm:  snapshot.PrevLogTerm,
+		LeaderCommit: snapshot.CommitIndex,
+	}
 	// Start goroutines to send RPCs to all peers asynchronously
 	for peer := range rf.peers {
-		if peer == snapshot.Me {
+		if peer == rf.me {
 			continue
 		}
 
 		go func(server int) {
-			// Check if we should stop before sending
-			select {
-			case <-stopCh:
-				return
-			default:
-			}
-
-			// For heartbeat, use last log index as prevLogIndex
-			args := &AppendEntriesArgs{
-				Term:         snapshot.CurrentTerm,
-				LeaderId:     snapshot.Me,
-				PrevLogIndex: snapshot.LastLogIndex,
-				PrevLogTerm:  snapshot.PrevLogTerm,
-				LeaderCommit: snapshot.CommitIndex,
-			}
 
 			reply := &AppendEntriesReply{}
-			log.Printf("[Term %d] leader %d sends AppendEntries to %d", snapshot.CurrentTerm, snapshot.Me, server)
+			log.Printf("[Term %d] leader %d sends AppendEntries to %d", snapshot.CurrentTerm, rf.me, server)
 			ok := rf.sendAppendEntries(server, args, reply)
 
-			// Check if we should stop processing before sending reply
-			select {
-			case <-stopCh:
-				// Stop channel closed, don't send reply
-				return
-			default:
-				if ok {
-					replyCh <- reply
-				} else {
-					replyCh <- nil
-				}
+			toSend := (*AppendEntriesReply)(nil)
+			if ok {
+				toSend = reply
 			}
+			replyCh <- toSend
+
 		}(peer)
 	}
 
 	// Process replies asynchronously
 	go func() {
-		for {
-			select {
-			case reply := <-replyCh:
-				if reply == nil {
-					continue
+		repliesReceived := 0
+		for reply := range replyCh {
+			repliesReceived++
+			// If reply has higher term, stop processing and convert to follower
+			if reply != nil && reply.Term > snapshot.CurrentTerm {
+
+				// Acquire lock and convert to follower
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.becomeFollower(reply.Term)
 				}
+				rf.mu.Unlock()
 
-				// If reply has higher term, stop processing and convert to follower
-				if reply.Term > snapshot.CurrentTerm {
-					// Close stop channel to prevent other goroutines from sending more replies
-					once.Do(func() {
-						close(stopCh)
-					})
-
-					// Acquire lock and convert to follower
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.becomeFollower(reply.Term)
-					}
-					rf.mu.Unlock()
-
-					// Drain remaining replies and exit
-					for {
-						select {
-						case <-replyCh:
-							// Drain
-						default:
-							return
-						}
-					}
-				}
-
-			case <-stopCh:
-				// Stop processing, exit
 				return
 			}
+
+			if repliesReceived >= peerCount {
+				return
+			}
+
 		}
+
 	}()
 }
 
@@ -507,156 +573,107 @@ func (rf *Raft) startElection(snapshot StateSnapshot) {
 	peerCount := len(rf.peers) - 1 // Exclude self
 	majority := (len(rf.peers))/2 + 1
 	voteCh := make(chan *RequestVoteReply, peerCount)
-	stopCh := make(chan struct{}) // Channel to signal stop processing replies
-	var once sync.Once
+	stopCh := make(chan struct{})
 	votesReceived := 1 // Count self vote
+	args := &RequestVoteArgs{
+		Term:         snapshot.CurrentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: snapshot.LastLogIndex,
+		LastLogTerm:  snapshot.LastLogTerm,
+	}
 
 	// Start goroutines to send RequestVote to all peers asynchronously
 	for peer := range rf.peers {
-		if peer == snapshot.Me {
+		if peer == rf.me {
 			continue
 		}
 
 		go func(server int) {
-			// Check if we should stop before sending
-			select {
-			case <-stopCh:
-				return
-			default:
-			}
 
-			args := &RequestVoteArgs{
-				Term:         snapshot.CurrentTerm,
-				CandidateId:  snapshot.Me,
-				LastLogIndex: snapshot.LastLogIndex,
-				LastLogTerm:  snapshot.LastLogTerm,
-			}
 			reply := &RequestVoteReply{}
 
 			ok := rf.sendRequestVote(server, args, reply)
 
 			// Check if we should stop processing before sending reply
-			select {
-			case <-stopCh:
-				// Stop channel closed, don't send reply
-				return
-			default:
-				if ok {
-					log.Printf("[Term %d] server %d sent RequestVote to %d, get reply: %v", snapshot.CurrentTerm, snapshot.Me, server, reply)
-					voteCh <- reply
-				} else {
-					log.Printf("[Term %d] server %d sent RequestVote to %d, failed", snapshot.CurrentTerm, snapshot.Me, server)
-					voteCh <- nil
-				}
+
+			if ok {
+				log.Printf("[Term %d] server %d sent RequestVote to %d, get reply: %v", snapshot.CurrentTerm, rf.me, server, reply)
+				voteCh <- reply
+			} else {
+				log.Printf("[Term %d] server %d sent RequestVote to %d, failed", snapshot.CurrentTerm, rf.me, server)
+				voteCh <- nil
 			}
+
 		}(peer)
 	}
 
-	// Process replies asynchronously with countdown timer
-	electionTimeout := 500 * time.Millisecond
-	timer := time.NewTimer(electionTimeout)
-	defer timer.Stop()
+	// Process replies asynchronously
+	// set election timeout
+	ms := 50 + (rand.Int63() % 300)
+	electionTimeout := time.Duration(ms) * time.Millisecond
+	electionDeadline := time.Now().Add(electionTimeout)
 
+	// check if election timeout
 	go func() {
 		for {
-			select {
-			case reply := <-voteCh:
-				if reply == nil {
-					continue
-				}
-
-				// If reply has higher term, stop processing and convert to follower
-				if reply.Term > snapshot.CurrentTerm {
-					// Close stop channel to prevent other goroutines from sending more replies
-					once.Do(func() {
-						close(stopCh)
-						timer.Stop()
-					})
-
-					// Acquire lock and convert to follower
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.becomeFollower(reply.Term)
-					}
-					rf.mu.Unlock()
-
-					// Drain remaining replies and exit
-					for {
-						select {
-						case <-voteCh:
-							// Drain
-						default:
-							return
-						}
-					}
-				}
-
-				// Only count votes for current term
-				rf.mu.Lock()
-				if reply.VoteGranted && rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
-					votesReceived++
-					if votesReceived >= majority {
-						// Become leader and initialize leader state
-						rf.becomeLeader()
-						log.Printf("Candidate %d becomes leader", snapshot.Me)
-						rf.mu.Unlock()
-
-						// Close stop channel and stop timer
-						once.Do(func() {
-							close(stopCh)
-							timer.Stop()
-						})
-
-						// Drain remaining replies and exit
-						for {
-							select {
-							case <-voteCh:
-								// Drain
-							default:
-								return
-							}
-						}
-					}
-				}
-				rf.mu.Unlock()
-
-			case <-timer.C:
-				// Countdown expired: election failed, convert back to follower
-				once.Do(func() {
-					close(stopCh)
-				})
-
-				rf.mu.Lock()
-				if rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
-					// Check one more time if we have enough votes
-					if votesReceived >= majority {
-						rf.becomeLeader()
-						log.Printf("Candidate %d becomes leader (after timeout)", snapshot.Me)
-					} else {
-						// Election failed, convert back to follower
-						rf.state = Follower
-						rf.lastHeartbeatTime = time.Now()
-						log.Printf("Candidate %d does not become leader (timeout), reverting to follower", snapshot.Me)
-					}
-				}
-				rf.mu.Unlock()
-
-				// Drain remaining replies and exit
-				for {
-					select {
-					case <-voteCh:
-						// Drain
-					default:
-						return
-					}
-				}
-
-			case <-stopCh:
-				// Stop processing, exit
+			if time.Now().After(electionDeadline) {
+				log.Printf("[Term %d] server %d election timeout", snapshot.CurrentTerm, rf.me)
+				close(stopCh)
 				return
 			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
+
+	// Process replies
+	for {
+		select {
+		case <-stopCh:
+			// Timeout Stop election, exit
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
+				rf.becomeFollower(snapshot.CurrentTerm)
+			}
+			return
+
+		case reply := <-voteCh:
+			if reply == nil {
+				continue
+			}
+
+			// If reply has higher term, stop processing and convert to follower
+			if reply.Term > snapshot.CurrentTerm {
+				// Acquire lock and convert to follower
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.becomeFollower(reply.Term)
+				}
+				rf.mu.Unlock()
+				return
+			}
+
+			// Only count votes for current term
+			if !reply.VoteGranted {
+				continue
+			}
+
+			votesReceived++
+			if votesReceived >= majority {
+				// Close stop channel and stop timer
+
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if rf.state == Candidate && rf.currentTerm == snapshot.CurrentTerm {
+					rf.becomeLeader()
+					log.Printf("Candidate %d becomes leader", rf.me)
+				}
+				return
+			}
+
+		}
+	}
+
 }
 
 // ticker runs in a loop and either sends heartbeats (if leader)
@@ -678,9 +695,9 @@ func (rf *Raft) ticker() {
 			time.Sleep(100 * time.Millisecond)
 		} else {
 			// Follower/Candidate checks for election timeout
-			if time.Now().After(lastHeartbeat.Add(ElectionTimeout)) {
+			if time.Now().After(lastHeartbeat.Add(HeartbeatTimeout)) {
 				rf.becomeCandidate()
-				rf.mu.Unlock()
+
 				// Get fresh snapshot after becoming candidate (term has changed)
 				snapshot := rf.getStateSnapshot()
 				rf.mu.Unlock()
@@ -689,12 +706,9 @@ func (rf *Raft) ticker() {
 			} else {
 				rf.mu.Unlock()
 			}
-
-			// pause for a random amount of time between 50 and 350
-			// milliseconds.
-			ms := 50 + (rand.Int63() % 300)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
+		// Heartbeat interval (e.g., 100ms)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -718,7 +732,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = []LogEntry{}
+	rf.log = []LogEntry{{Term: 0, Command: nil}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 

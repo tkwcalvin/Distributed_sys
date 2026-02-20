@@ -2,7 +2,7 @@ package raft
 
 import (
 	"fmt"
-	//log
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -242,10 +242,10 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 				ts.srvs[starts].mu.Unlock()
 			}
 			if rf != nil {
-				//log.Printf("peer %d Start %v", starts, cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
+					log.Printf("DEBUG one(%v) submitted to server %d at index %d", cmd, starts, index1)
 					break
 				}
 			}
@@ -255,8 +255,13 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
+			lastLog := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := ts.nCommitted(index)
+				if time.Since(lastLog).Milliseconds() >= 500 {
+					log.Printf("DEBUG one(%v) waiting: %d/%d committed at index %d after %.1fs", cmd, nd, expectedServers, index, time.Since(t1).Seconds())
+					lastLog = time.Now()
+				}
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -268,6 +273,8 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			nd, _ := ts.nCommitted(index)
+			log.Printf("DEBUG one(%v) failed after 2s: only %d/%d committed at index %d, retry=%v", cmd, nd, expectedServers, index, retry)
 			if retry == false {
 				desp := fmt.Sprintf("agreement of %.8s failed", textcmd)
 				tester.AnnotateCheckerFailure(desp, "failed after submitting command")

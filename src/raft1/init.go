@@ -43,6 +43,7 @@ type Raft struct {
 	currentTerm int        // Latest term server has seen (initialized to 0 on first boot, increases monotonically)
 	votedFor    int        // CandidateId that received vote in current term (or -1 if none)
 	log         []LogEntry // Log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	// logTermMap  map[int]LogTermIndex // Map of log term to the first index of the term (for fast lookup)
 
 	// Volatile state on all servers
 	commitIndex int // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -57,7 +58,12 @@ type Raft struct {
 	state int // Current state: Follower, Candidate, or Leader
 
 	// Last time receive the heartbeat from leader
-	lastHeartbeatTime time.Time
+	nextElectionTimeout time.Time
+}
+
+type LogTermIndex struct {
+	FirstIndex int
+	LastIndex  int
 }
 
 // recent saved state, if any. applyCh is a channel on which the
@@ -80,7 +86,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
 
-	rf.lastHeartbeatTime = time.Now()
+	rf.nextElectionTimeout = getNextElectionDeadline()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

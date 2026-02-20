@@ -10,8 +10,9 @@ package raft
 
 import (
 	"fmt"
-	// "log"
+	"log"
 	"math/rand"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -999,7 +1000,11 @@ func TestFigure8Unreliable3C(t *testing.T) {
 	ts.one(rand.Int()%10000, 1, true)
 
 	nup := servers
+	loopStart := time.Now()
 	for iters := 0; iters < 1000; iters++ {
+		if iters > 0 && iters%100 == 0 {
+			log.Printf("DEBUG TestFigure8Unreliable3C iter %d/1000 elapsed %.1fs goroutines %d", iters, time.Since(loopStart).Seconds(), runtime.NumGoroutine())
+		}
 		if iters == 200 {
 			ts.SetLongReordering(true)
 		}
@@ -1040,6 +1045,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 		}
 	}
 
+	log.Printf("DEBUG TestFigure8Unreliable3C loop done after %.1fs goroutines %d, reconnecting all", time.Since(loopStart).Seconds(), runtime.NumGoroutine())
 	for i := 0; i < servers; i++ {
 		if !ts.g.IsConnected(i) {
 			ts.g.ConnectOne(i)
@@ -1047,7 +1053,9 @@ func TestFigure8Unreliable3C(t *testing.T) {
 	}
 	tester.AnnotateConnection(ts.g.GetConnected())
 
+	log.Printf("DEBUG TestFigure8Unreliable3C final ts.one")
 	ts.one(rand.Int()%10000, servers, true)
+	log.Printf("DEBUG TestFigure8Unreliable3C PASS")
 }
 
 func internalChurn(t *testing.T, reliable bool) {

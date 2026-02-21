@@ -19,3 +19,7 @@ func getNextElectionDeadline() time.Time {
 	ms := 150 + (rand.Int63() % 150)
 	return time.Now().Add(time.Duration(ms) * time.Millisecond)
 }
+
+func (rf *Raft) getIndexAfterCompaction(index int) int {
+	return len(rf.log) - rf.lastLogIndex + index - 1
+}

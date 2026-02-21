@@ -76,8 +76,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term)
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		if args.LastLogTerm > rf.log[len(rf.log)-1].Term ||
-			(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1) {
+		if args.LastLogTerm > rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term ||
+			(args.LastLogTerm == rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term && args.LastLogIndex >= rf.lastLogIndex) {
 			rf.votedFor = args.CandidateId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
@@ -86,7 +86,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	log.Printf("[Term %d] server %d does not vote for %d, votedFor %d, server's lastLogTerm %d, lastLogIndex %d, candidate's lastLogTerm %d, lastLogIndex %d", rf.currentTerm, rf.me, args.CandidateId, rf.votedFor, rf.log[len(rf.log)-1].Term, len(rf.log)-1, args.LastLogTerm, args.LastLogIndex)
+	log.Printf("[Term %d] server %d does not vote for %d, votedFor %d, server's lastLogTerm %d, lastLogIndex %d, candidate's lastLogTerm %d, lastLogIndex %d",
+		rf.currentTerm, rf.me, args.CandidateId, rf.votedFor, rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term, rf.lastLogIndex, args.LastLogTerm, args.LastLogIndex)
 
 }
 
@@ -112,8 +113,8 @@ func (rf *Raft) startElection(term int) {
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
-		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+		LastLogIndex: rf.lastLogIndex,
+		LastLogTerm:  rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term,
 	}
 	rf.mu.Unlock()
 

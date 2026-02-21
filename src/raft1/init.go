@@ -12,6 +12,7 @@ import (
 
 // LogEntry represents a single entry in the log
 type LogEntry struct {
+	Index   int         // Index of the log entry
 	Command interface{} // Command for state machine
 	Term    int         // Term when entry was received by leader
 }
@@ -36,15 +37,18 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers (updated on stable storage before responding to RPCs)
-	currentTerm int        // Latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int        // CandidateId that received vote in current term (or -1 if none)
-	log         []LogEntry // Log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	currentTerm       int        // Latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor          int        // CandidateId that received vote in current term (or -1 if none)
+	log               []LogEntry // Log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	lastIncludedIndex int        // Snapshot replaces all log entries through and including this index (0 if no snapshot)
+	lastIncludedTerm  int        // Term of the entry at lastIncludedIndex (for PrevLogTerm when log was trimmed)
 	// logTermMap  map[int]LogTermIndex // Map of log term to the first index of the term (for fast lookup)
 
 	// Volatile state on all servers
-	commitIndex int // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
-	lastApplied int // Index of highest log entry applied to state machine (initialized to 0, increases monotonically)
-	applyCh     chan raftapi.ApplyMsg
+	commitIndex  int // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
+	lastApplied  int // Index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	applyCh      chan raftapi.ApplyMsg
+	lastLogIndex int // Index of the last log entry (initialized to 0, increases monotonically)
 
 	// Volatile state on leaders (reinitialized after election)
 	nextIndex  []int // For each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
@@ -55,11 +59,6 @@ type Raft struct {
 
 	// Last time receive the heartbeat from leader
 	nextElectionTimeout time.Time
-}
-
-type LogTermIndex struct {
-	FirstIndex int
-	LastIndex  int
 }
 
 // recent saved state, if any. applyCh is a channel on which the
@@ -77,11 +76,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = []LogEntry{{Term: 0, Command: nil}}
+	rf.log = []LogEntry{{Index: 0, Term: 0, Command: nil}}
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.applyCh = applyCh
-
+	rf.lastLogIndex = 0
 	rf.nextElectionTimeout = getNextElectionDeadline()
 
 	// initialize from state persisted before a crash

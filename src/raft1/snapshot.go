@@ -6,5 +6,12 @@ package raft
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index > rf.lastLogIndex {
+		return
+	}
+	rf.log = rf.log[rf.getIndexAfterCompaction(index):]
+	rf.persist(snapshot)
 
 }

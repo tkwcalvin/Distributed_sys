@@ -14,7 +14,7 @@ import (
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (3C).
 	// Example:
 	w := new(bytes.Buffer)
@@ -23,7 +23,11 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	if snapshot != nil {
+		rf.persister.Save(raftstate, snapshot)
+	} else {
+		rf.persister.Save(raftstate, nil)
+	}
 }
 
 // restore previously persisted state.
@@ -49,7 +53,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.log = persistedLog
-	log.Printf("DEBUG [readPersist] server %d restored term=%d votedFor=%d logLen=%d", rf.me, currentTerm, votedFor, len(persistedLog))
+	rf.lastLogIndex = persistedLog[len(persistedLog)-1].Index
+	log.Printf("DEBUG [readPersist] server %d restored term=%d votedFor=%d logLen=%d", rf.me, currentTerm, votedFor, rf.lastLogIndex+1)
 
 }
 

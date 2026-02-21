@@ -55,13 +55,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	if command != nil {
-		rf.log = append(rf.log, LogEntry{Command: command, Term: term})
-		rf.matchIndex[rf.me] = len(rf.log) - 1
-
-		rf.nextIndex[rf.me] = len(rf.log)
-		rf.persist()
+		index = rf.lastLogIndex + 1
+		rf.log = append(rf.log, LogEntry{Index: index, Command: command, Term: term})
+		rf.matchIndex[rf.me] = index
+		rf.nextIndex[rf.me] = index + 1
+		rf.lastLogIndex = index
+		rf.persist(nil)
 	}
-	index = len(rf.log) - 1
 	rf.mu.Unlock()
 
 	return index, term, isLeader

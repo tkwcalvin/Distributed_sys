@@ -74,13 +74,14 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 	}
 	term := rf.currentTerm
 	nextIndex := rf.nextIndex[server]
-	newNextIndex := len(rf.log)
-	entries := rf.log[nextIndex:]
+	newNextIndex := rf.lastLogIndex + 1
+	entries := rf.log[rf.getIndexAfterCompaction(nextIndex):]
+
 	args := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     rf.me,
 		PrevLogIndex: nextIndex - 1,
-		PrevLogTerm:  rf.log[nextIndex-1].Term,
+		PrevLogTerm:  rf.log[rf.getIndexAfterCompaction(nextIndex-1)].Term,
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -135,6 +136,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 		rf.mu.Unlock()
 		return
 	}
+	// peer's log is too short, reset nextIndex to the length of the log
 	if reply.XTerm == 0 {
 		rf.nextIndex[server] = reply.XLen
 		rf.mu.Unlock()
@@ -143,7 +145,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 	lastXTermIndex := -1
 	for i := len(rf.log) - 1; i >= 0; i-- {
 		if rf.log[i].Term == reply.XTerm {
-			lastXTermIndex = i
+			lastXTermIndex = rf.log[i].Index
 			break
 		}
 	}
@@ -178,15 +180,15 @@ func (rf *Raft) applier() {
 			// 规则1：仅当前任期日志可直接提交
 
 			// 打印log任期和当前任期
-			log.Printf("DEBUG [applier] leader %d term %d log[%d].Term=%d currentTerm=%d", rf.me, rf.currentTerm, n, rf.log[n].Term, rf.currentTerm)
-			if rf.log[n].Term == rf.currentTerm {
+			log.Printf("DEBUG [applier] leader %d term %d log[%d].Term=%d currentTerm=%d", rf.me, rf.currentTerm, n, rf.log[rf.getIndexAfterCompaction(n)].Term, rf.currentTerm)
+			if rf.log[rf.getIndexAfterCompaction(n)].Term == rf.currentTerm {
 				rf.commitIndex = n
 			}
 
 		}
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
-			entry := rf.log[rf.lastApplied]
+			entry := rf.log[rf.getIndexAfterCompaction(rf.lastApplied)]
 			idx := rf.lastApplied
 			rf.mu.Unlock()
 			// 不要在持锁时向 applyCh 发送，否则 channel 满会阻塞并导致死锁（Start/ticker 等拿不到锁）
@@ -255,10 +257,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	newEntriesIndex := 0
 
 	for {
-		if logInsertIndex > len(rf.log)-1 || newEntriesIndex > len(args.Entries)-1 {
+		if logInsertIndex > rf.lastLogIndex || newEntriesIndex > len(args.Entries)-1 {
 			break
 		}
-		if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+		if rf.log[rf.getIndexAfterCompaction(logInsertIndex)].Term != args.Entries[newEntriesIndex].Term {
 			break
 		}
 		logInsertIndex++
@@ -266,17 +268,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if newEntriesIndex < len(args.Entries) {
-		rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+		rf.log = append(rf.log[:rf.getIndexAfterCompaction(logInsertIndex)], args.Entries[newEntriesIndex:]...)
+		rf.lastLogIndex = rf.log[len(rf.log)-1].Index
 		log.Printf("DEBUG [AE accept] follower %d <- leader %d term %d: appended %d entries, logLen=%d",
-			rf.me, args.LeaderId, args.Term, len(args.Entries)-newEntriesIndex, len(rf.log))
-		rf.persist()
+			rf.me, args.LeaderId, args.Term, len(args.Entries)-newEntriesIndex, rf.lastLogIndex+1)
+		rf.persist(nil)
 	}
 
 	// commit the log if the leader commit index is greater than the follower commit index
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.commitIndex = min(args.LeaderCommit, rf.lastLogIndex)
 		log.Printf("DEBUG [commitIdx] follower %d <- leader %d: commitIdx -> %d (logLen=%d)",
-			rf.me, args.LeaderId, rf.commitIndex, len(rf.log))
+			rf.me, args.LeaderId, rf.commitIndex, rf.lastLogIndex+1)
 	}
 
 	rf.nextElectionTimeout = getNextElectionDeadline()
@@ -288,24 +291,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	if args.PrevLogIndex > len(rf.log)-1 {
+	if args.PrevLogIndex > rf.lastLogIndex {
 		reply.XTerm = 0
 		reply.XIndex = 0
-		reply.XLen = len(rf.log)
+		reply.XLen = rf.lastLogIndex + 1
 		log.Printf("DEBUG [AE reject] follower %d <- leader %d: prevIdx=%d > logLen-1=%d (log too short)",
-			rf.me, args.LeaderId, args.PrevLogIndex, len(rf.log)-1)
+			rf.me, args.LeaderId, args.PrevLogIndex, rf.lastLogIndex)
 		return false
 	}
 
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.XTerm = rf.log[args.PrevLogIndex].Term
+	if rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term
 		reply.XIndex = args.PrevLogIndex
-		for reply.XIndex > 0 && rf.log[reply.XIndex-1].Term == reply.XTerm {
+		for reply.XIndex > 0 && rf.log[rf.getIndexAfterCompaction(reply.XIndex-1)].Term == reply.XTerm {
 			reply.XIndex--
 		}
-		reply.XLen = len(rf.log)
 		log.Printf("DEBUG [AE reject] follower %d <- leader %d: term mismatch at prevIdx=%d (have %d want %d), XTerm=%d XIdx=%d",
-			rf.me, args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
+			rf.me, args.LeaderId, args.PrevLogIndex, rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
 		return false
 	}
 	return true

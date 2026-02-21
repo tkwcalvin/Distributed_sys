@@ -16,6 +16,6 @@ func DPrintf(format string, a ...interface{}) {
 }
 
 func getNextElectionDeadline() time.Time {
-	ms := 50 + (rand.Int63() % 300)
+	ms := 150 + (rand.Int63() % 150)
 	return time.Now().Add(time.Duration(ms) * time.Millisecond)
 }

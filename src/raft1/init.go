@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -20,11 +21,6 @@ const (
 	Follower  = 0
 	Candidate = 1
 	Leader    = 2
-)
-
-// Election timeout
-const (
-	HeartbeatTimeout = 250 * time.Millisecond
 )
 
 // A Go object implementing a single Raft peer.
@@ -90,6 +86,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	log.Printf("DEBUG [Make] server %d started state=%d term=%d logLen=%d", rf.me, rf.state, rf.currentTerm, len(rf.log))
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

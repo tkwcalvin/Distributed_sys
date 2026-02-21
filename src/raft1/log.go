@@ -9,10 +9,42 @@ import (
 	"6.5840/raftapi"
 )
 
+// example code to send a AppendEntries RPC to a server.
+// server is the index of the target server in rf.peers[].
+// expects RPC arguments in args.
+// fills in *reply with RPC reply, so caller should
+// pass &reply.
+// the types of the args and reply passed to Call() must be
+// the same as the types of the arguments declared in the
+// handler function (including whether they are pointers).
+//
+// The labrpc package simulates a lossy network, in which servers
+// may be unreachable, and in which requests and replies may be lost.
+// Call() sends a request and waits for a reply. If a reply arrives
+// within a timeout interval, Call() returns true; otherwise
+// Call() returns false. Thus Call() may not return for a while.
+// A false return can be caused by a dead server, a live server that
+// can't be reached, a lost request, or a lost reply.
+//
+// Call() is guaranteed to return (perhaps after a delay) *except* if the
+// handler function on the server side does not return.  Thus there
+// is no need to implement your own timeouts around Call().
+//
+// look at the comments in ../labrpc/labrpc.go for more details.
+//
+// if you're having trouble getting RPC to work, check that you've
+// capitalized all field names in structs passed over RPC, and
+// that the caller passes the address of the reply struct with &, not
+// the struct itself.
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 func (rf *Raft) replicateLog() {
 	once := sync.Once{}
 	stopCh := make(chan struct{})
-	for {
+	for !rf.killed() {
 		select {
 		case <-stopCh:
 			return
@@ -26,7 +58,7 @@ func (rf *Raft) replicateLog() {
 			go rf.NotifyLogReplication(server, &once, stopCh)
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -57,7 +89,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 
 	reply := &AppendEntriesReply{}
 	ok := rf.sendAppendEntries(server, args, reply)
-	log.Printf("[leader sendAppendEntries] leader %d term %d <- server %d: ok=%v", rf.me, term, server, ok)
+	//log.Printf("[leader sendAppendEntries] leader %d term %d <- server %d: ok=%v", rf.me, term, server, ok)
 	if !ok {
 		return
 	}
@@ -86,7 +118,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 			return
 		}
 		rf.nextIndex[server] = newNextIndex
-		rf.matchIndex[server] = max(newNextIndex-1, rf.matchIndex[server])
+		rf.matchIndex[server] = newNextIndex - 1
 		rf.mu.Unlock()
 
 		return
@@ -196,9 +228,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// defer log.Printf("[Term %d] server %d receives entries from %d, reply: %v", rf.currentTerm, rf.me, args.LeaderId, reply)
-	// defer log.Printf("[Term %d] server %d receives entries from %d, args: %v", rf.currentTerm, rf.me, args.LeaderId, args)
-
 	if args.Term < rf.currentTerm {
 		// Outdated term, reply false and keep the current term
 		reply.Term = rf.currentTerm
@@ -222,18 +251,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// append new entries to the log
+	logInsertIndex := args.PrevLogIndex + 1
+	newEntriesIndex := 0
 
-	for i, entry := range args.Entries {
-		// if the log is out of range or the term is not the same, append the new entries
-		newIndex := args.PrevLogIndex + i + 1
-		if newIndex > len(rf.log)-1 || rf.log[newIndex].Term != entry.Term {
-			rf.log = append(rf.log[:newIndex], args.Entries[i:]...)
-			log.Printf("DEBUG [AE accept] follower %d <- leader %d term %d: appended %d entries, logLen=%d",
-				rf.me, args.LeaderId, args.Term, len(args.Entries)-i, len(rf.log))
-			rf.persist()
+	for {
+		if logInsertIndex > len(rf.log)-1 || newEntriesIndex > len(args.Entries)-1 {
 			break
 		}
+		if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+			break
+		}
+		logInsertIndex++
+		newEntriesIndex++
+	}
 
+	if newEntriesIndex < len(args.Entries) {
+		rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+		log.Printf("DEBUG [AE accept] follower %d <- leader %d term %d: appended %d entries, logLen=%d",
+			rf.me, args.LeaderId, args.Term, len(args.Entries)-newEntriesIndex, len(rf.log))
+		rf.persist()
 	}
 
 	// commit the log if the leader commit index is greater than the follower commit index
@@ -244,6 +280,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.nextElectionTimeout = getNextElectionDeadline()
+	//log.Printf("DEBUG [AE handler] follower %d <- leader %d term %d: reset timeout",
+	//	rf.me, args.LeaderId, args.Term)
 	reply.Term = rf.currentTerm
 	reply.Success = true
 

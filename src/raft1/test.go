@@ -233,10 +233,12 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 	for time.Since(t0).Seconds() < 10 && ts.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
+		tryCount := 0
 		for range ts.srvs {
 			starts = (starts + 1) % len(ts.srvs)
 			var rf raftapi.Raft
-			if ts.g.IsConnected(starts) {
+			connected := ts.g.IsConnected(starts)
+			if connected {
 				ts.srvs[starts].mu.Lock()
 				rf = ts.srvs[starts].raft
 				ts.srvs[starts].mu.Unlock()
@@ -249,6 +251,17 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 					break
 				}
 			}
+			tryCount++
+		}
+		if index == -1 && tryCount == len(ts.srvs) {
+			// Log when we tried all servers and none was leader
+			connected := []int{}
+			for i := 0; i < ts.n; i++ {
+				if ts.g.IsConnected(i) {
+					connected = append(connected, i)
+				}
+			}
+			log.Printf("DEBUG one(%v) no leader (connected=%v) after %.1fs", cmd, connected, time.Since(t0).Seconds())
 		}
 
 		if index != -1 {

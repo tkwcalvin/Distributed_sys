@@ -41,7 +41,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
 	Term         int // Candidate's term
 	CandidateId  int // Candidate requesting vote
 	LastLogIndex int // Index of candidate's last log entry (§5.4)
@@ -51,14 +50,12 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
 	Term        int  // CurrentTerm, for candidate to update itself
 	VoteGranted bool // True means candidate received vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
 	if rf.killed() == true {
 		return
 	}

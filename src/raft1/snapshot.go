@@ -42,7 +42,6 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	// Your code here (3D).
 	rf.mu.Lock()
 
 	if args.Term < rf.currentTerm {
@@ -57,6 +56,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persist(args.Data)
 	if args.LastIncludedIndex <= rf.lastLogIndex &&
 		rf.log[rf.getIndexAfterCompaction(args.LastIncludedIndex)].Term == args.LastIncludedTerm {
+		// follower has the log of the last included index and term
+		// remain the following entries in the log
 		rf.log = rf.log[rf.getIndexAfterCompaction(args.LastIncludedIndex):]
 		rf.lastIncludedIndex = args.LastIncludedIndex
 		rf.lastIncludedTerm = args.LastIncludedTerm

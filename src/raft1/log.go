@@ -74,7 +74,9 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 	}
 	term := rf.currentTerm
 	nextIndex := rf.nextIndex[server]
-	if len(rf.log) == 0 || rf.lastIncludedIndex >= nextIndex {
+	// if leader has discarded the next index entry for the peer
+	// send the snapshot to the follower
+	if rf.lastIncludedIndex >= nextIndex {
 		lastIncludedIndex := rf.lastIncludedIndex
 		reply := &InstallSnapshotReply{}
 		args := &InstallSnapshotArgs{
@@ -186,6 +188,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 		rf.mu.Unlock()
 		return
 	}
+	// find the last index of the conflicting term
 	lastXTermIndex := -1
 	for i := len(rf.log) - 1; i >= 0; i-- {
 		if rf.log[i].Term == reply.XTerm {
@@ -224,7 +227,7 @@ func (rf *Raft) applier() {
 			//log.Printf("DEBUG [applier] leader %d term %d matchIndex=%v", rf.me, rf.currentTerm, matchCopy)
 			sort.Ints(matchCopy)
 			n := max(matchCopy[len(matchCopy)-majority], rf.lastApplied)
-			// 规则1：仅当前任期日志可直接提交
+			// 规则：仅当前任期日志可直接提交
 
 			// print n, log len and lastLogIndex
 			//log.Printf("DEBUG [applier] leader %d term %d n=%d logLen=%d lastLogIndex=%d", rf.me, rf.currentTerm, n, len(rf.log), rf.lastLogIndex)
@@ -308,6 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	logInsertIndex := args.PrevLogIndex + 1
 	newEntriesIndex := 0
 
+	// find the mismatch index
 	for {
 		if logInsertIndex > rf.lastLogIndex || newEntriesIndex > len(args.Entries)-1 {
 			break
@@ -319,6 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newEntriesIndex++
 	}
 
+	// append the new entries to the log
 	if newEntriesIndex < len(args.Entries) {
 		rf.log = append(rf.log[:rf.getIndexAfterCompaction(logInsertIndex)], args.Entries[newEntriesIndex:]...)
 		rf.lastLogIndex = rf.log[len(rf.log)-1].Index
@@ -343,6 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	// log too short
 	if args.PrevLogIndex > rf.lastLogIndex {
 		reply.XTerm = 0
 		reply.XIndex = 0
@@ -352,6 +358,7 @@ func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesR
 		return false
 	}
 
+	// term mismatch
 	if rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term != args.PrevLogTerm {
 		reply.XTerm = rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term
 		reply.XIndex = args.PrevLogIndex

@@ -43,8 +43,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	// Your code here (3B).
-
 	rf.mu.Lock()
 
 	term = rf.currentTerm

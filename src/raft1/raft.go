@@ -60,7 +60,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 		rf.lastLogIndex = index
-		rf.persist(nil)
+		rf.persist(rf.persister.ReadSnapshot())
 	}
 	rf.mu.Unlock()
 

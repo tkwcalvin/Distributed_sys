@@ -2,7 +2,6 @@ package raft
 
 import (
 	"bytes"
-	"log"
 
 	"6.5840/labgob"
 )
@@ -22,12 +21,14 @@ func (rf *Raft) persist(snapshot []byte) {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	if snapshot != nil {
-		rf.persister.Save(raftstate, snapshot)
-	} else {
-		rf.persister.Save(raftstate, nil)
-	}
+
+	rf.persister.Save(raftstate, snapshot)
+	// print the snapshot data length
+	//log.Printf("DEBUG [persist] server %d term %d snapshot data length %d", rf.me, rf.currentTerm, len(snapshot))
+
 }
 
 // restore previously persisted state.
@@ -41,9 +42,13 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var persistedLog []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&persistedLog) != nil {
+		d.Decode(&persistedLog) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 		// failed to decode persisted state
 		return
 	}
@@ -54,7 +59,9 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.votedFor = votedFor
 	rf.log = persistedLog
 	rf.lastLogIndex = persistedLog[len(persistedLog)-1].Index
-	log.Printf("DEBUG [readPersist] server %d restored term=%d votedFor=%d logLen=%d", rf.me, currentTerm, votedFor, rf.lastLogIndex+1)
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	//log.Printf("DEBUG [readPersist] server %d restored term=%d votedFor=%d logLen=%d", rf.me, currentTerm, votedFor, rf.lastLogIndex+1)
 
 }
 

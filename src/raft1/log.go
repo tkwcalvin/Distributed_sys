@@ -74,9 +74,53 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 	}
 	term := rf.currentTerm
 	nextIndex := rf.nextIndex[server]
+	if len(rf.log) == 0 || rf.lastIncludedIndex >= nextIndex {
+		lastIncludedIndex := rf.lastIncludedIndex
+		reply := &InstallSnapshotReply{}
+		args := &InstallSnapshotArgs{
+			Term:              term,
+			LeaderId:          rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Data:              rf.persister.ReadSnapshot(),
+		}
+		// print the snapshot data length
+		//log.Printf("DEBUG [NotifyLogReplication] leader %d term %d <- server %d snapshot data length %d, saved snapshot data length %d", rf.me, term, server, len(args.Data), len(rf.persister.ReadSnapshot()))
+		rf.mu.Unlock()
+		ok := rf.sendInstallSnapshot(server, args, reply)
+		if !ok {
+			return
+		}
+		if reply.Term > term {
+			//log.Printf("DEBUG [leader stepdown] leader %d term %d <- server %d reply.term=%d", rf.me, term, server, reply.Term)
+			once.Do(func() {
+				close(stopCh)
+				rf.mu.Lock()
+				if rf.state == Leader && rf.currentTerm == term {
+					rf.becomeFollower(reply.Term)
+				}
+				rf.mu.Unlock()
+			})
+			return
+		}
+		//log.Printf("DEBUG [leader sendInstallSnapshot] leader %d term %d <- server %d: ok=%v", rf.me, term, server, ok)
+		rf.mu.Lock()
+		if rf.state != Leader || rf.currentTerm != term {
+			once.Do(func() {
+				close(stopCh)
+			})
+			rf.mu.Unlock()
+			return
+		}
+		rf.nextIndex[server] = lastIncludedIndex + 1
+		rf.matchIndex[server] = lastIncludedIndex
+		rf.mu.Unlock()
+		return
+	}
 	newNextIndex := rf.lastLogIndex + 1
 	entries := rf.log[rf.getIndexAfterCompaction(nextIndex):]
-
+	// print log len and lastLogIndex and prevLogIndex
+	//log.Printf("DEBUG [NotifyLogReplication] leader %d term %d -> server %d logLen=%d lastLogIndex=%d prevLogIndex=%d", rf.me, term, server, len(rf.log), rf.lastLogIndex, nextIndex-1)
 	args := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     rf.me,
@@ -96,7 +140,7 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 	}
 
 	if reply.Term > term {
-		log.Printf("DEBUG [leader stepdown] leader %d term %d <- server %d reply.term=%d", rf.me, term, server, reply.Term)
+		//log.Printf("DEBUG [leader stepdown] leader %d term %d <- server %d reply.term=%d", rf.me, term, server, reply.Term)
 		once.Do(func() {
 			close(stopCh)
 			rf.mu.Lock()
@@ -156,31 +200,36 @@ func (rf *Raft) NotifyLogReplication(server int, once *sync.Once, stopCh chan st
 		// leader does not has the conflicting term
 		rf.nextIndex[server] = reply.XIndex
 	}
-	nextCopy := make([]int, len(rf.nextIndex))
-	copy(nextCopy, rf.nextIndex)
-	commitIdx := rf.commitIndex
+	// nextCopy := make([]int, len(rf.nextIndex))
+	// copy(nextCopy, rf.nextIndex)
+	// commitIdx := rf.commitIndex
 	rf.mu.Unlock()
-	log.Printf("DEBUG [nextIdx] leader %d term %d after conflict <- server %d (XTerm=%d XIdx=%d): nextIdx=%v commitIdx=%d",
-		rf.me, term, server, reply.XTerm, reply.XIndex, nextCopy, commitIdx)
+	// log.Printf("DEBUG [nextIdx] leader %d term %d after conflict <- server %d (XTerm=%d XIdx=%d): nextIdx=%v commitIdx=%d",
+	// 	rf.me, term, server, reply.XTerm, reply.XIndex, nextCopy, commitIdx)
 
 }
 
 func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		if rf.lastApplied <= rf.lastIncludedIndex {
+			rf.lastApplied = rf.lastIncludedIndex
+		}
 
 		if rf.state == Leader {
 			majority := (len(rf.peers))/2 + 1
 			matchCopy := make([]int, len(rf.matchIndex))
 			copy(matchCopy, rf.matchIndex)
 			// 打印match index
-			log.Printf("DEBUG [applier] leader %d term %d matchIndex=%v", rf.me, rf.currentTerm, matchCopy)
+			//log.Printf("DEBUG [applier] leader %d term %d matchIndex=%v", rf.me, rf.currentTerm, matchCopy)
 			sort.Ints(matchCopy)
-			n := matchCopy[len(matchCopy)-majority]
+			n := max(matchCopy[len(matchCopy)-majority], rf.lastApplied)
 			// 规则1：仅当前任期日志可直接提交
 
-			// 打印log任期和当前任期
-			log.Printf("DEBUG [applier] leader %d term %d log[%d].Term=%d currentTerm=%d", rf.me, rf.currentTerm, n, rf.log[rf.getIndexAfterCompaction(n)].Term, rf.currentTerm)
+			// print n, log len and lastLogIndex
+			//log.Printf("DEBUG [applier] leader %d term %d n=%d logLen=%d lastLogIndex=%d", rf.me, rf.currentTerm, n, len(rf.log), rf.lastLogIndex)
+			// // 打印log任期和当前任期
+			// log.Printf("DEBUG [applier] leader %d term %d log[%d].Term=%d currentTerm=%d", rf.me, rf.currentTerm, n, rf.log[rf.getIndexAfterCompaction(n)].Term, rf.currentTerm)
 			if rf.log[rf.getIndexAfterCompaction(n)].Term == rf.currentTerm {
 				rf.commitIndex = n
 			}
@@ -188,6 +237,9 @@ func (rf *Raft) applier() {
 		}
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
+
+			// print lastApplied and logLen and lastLogIndex and lastIncludedIndex
+			//log.Printf("DEBUG [applier] leader %d term %d lastApplied=%d logLen=%d lastLogIndex=%d lastIncludedIndex=%d", rf.me, rf.currentTerm, rf.lastApplied, len(rf.log), rf.lastLogIndex, rf.lastIncludedIndex)
 			entry := rf.log[rf.getIndexAfterCompaction(rf.lastApplied)]
 			idx := rf.lastApplied
 			rf.mu.Unlock()
@@ -272,7 +324,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.lastLogIndex = rf.log[len(rf.log)-1].Index
 		log.Printf("DEBUG [AE accept] follower %d <- leader %d term %d: appended %d entries, logLen=%d",
 			rf.me, args.LeaderId, args.Term, len(args.Entries)-newEntriesIndex, rf.lastLogIndex+1)
-		rf.persist(nil)
+		rf.persist(rf.persister.ReadSnapshot())
 	}
 
 	// commit the log if the leader commit index is greater than the follower commit index
@@ -295,8 +347,8 @@ func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesR
 		reply.XTerm = 0
 		reply.XIndex = 0
 		reply.XLen = rf.lastLogIndex + 1
-		log.Printf("DEBUG [AE reject] follower %d <- leader %d: prevIdx=%d > logLen-1=%d (log too short)",
-			rf.me, args.LeaderId, args.PrevLogIndex, rf.lastLogIndex)
+		// log.Printf("DEBUG [AE reject] follower %d <- leader %d: prevIdx=%d > logLen-1=%d (log too short)",
+		// 	rf.me, args.LeaderId, args.PrevLogIndex, rf.lastLogIndex)
 		return false
 	}
 
@@ -306,8 +358,8 @@ func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesR
 		for reply.XIndex > 0 && rf.log[rf.getIndexAfterCompaction(reply.XIndex-1)].Term == reply.XTerm {
 			reply.XIndex--
 		}
-		log.Printf("DEBUG [AE reject] follower %d <- leader %d: term mismatch at prevIdx=%d (have %d want %d), XTerm=%d XIdx=%d",
-			rf.me, args.LeaderId, args.PrevLogIndex, rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
+		// log.Printf("DEBUG [AE reject] follower %d <- leader %d: term mismatch at prevIdx=%d (have %d want %d), XTerm=%d XIdx=%d",
+		// 	rf.me, args.LeaderId, args.PrevLogIndex, rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term, args.PrevLogTerm, reply.XTerm, reply.XIndex)
 		return false
 	}
 	return true

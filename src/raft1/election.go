@@ -67,7 +67,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
-		log.Printf("[Term %d] server %d does not vote for %d, term %d < currentTerm %d", rf.currentTerm, rf.me, args.CandidateId, args.Term, rf.currentTerm)
+		//log.Printf("[Term %d] server %d does not vote for %d, term %d < currentTerm %d", rf.currentTerm, rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -81,13 +81,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
-			log.Printf("[Term %d] server %d votes for %d", rf.currentTerm, rf.me, args.CandidateId)
+			//log.Printf("[Term %d] server %d votes for %d", rf.currentTerm, rf.me, args.CandidateId)
 			return
 		}
 	}
 
-	log.Printf("[Term %d] server %d does not vote for %d, votedFor %d, server's lastLogTerm %d, lastLogIndex %d, candidate's lastLogTerm %d, lastLogIndex %d",
-		rf.currentTerm, rf.me, args.CandidateId, rf.votedFor, rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term, rf.lastLogIndex, args.LastLogTerm, args.LastLogIndex)
+	// log.Printf("[Term %d] server %d does not vote for %d, votedFor %d, server's lastLogTerm %d, lastLogIndex %d, candidate's lastLogTerm %d, lastLogIndex %d",
+	// 	rf.currentTerm, rf.me, args.CandidateId, rf.votedFor, rf.log[rf.getIndexAfterCompaction(rf.lastLogIndex)].Term, rf.lastLogIndex, args.LastLogTerm, args.LastLogIndex)
 
 }
 
@@ -97,11 +97,11 @@ func (rf *Raft) startElection(term int) {
 
 	rf.mu.Lock()
 	if rf.state != Follower || rf.currentTerm != term {
-		log.Printf("DEBUG [startElection] server %d REJECT state=%d term=%d (need Follower)", rf.me, rf.state, term)
+		//log.Printf("DEBUG [startElection] server %d REJECT state=%d term=%d (need Follower)", rf.me, rf.state, term)
 		rf.mu.Unlock()
 		return
 	}
-	log.Printf("DEBUG [startElection] server %d ENTER term=%d", rf.me, term)
+	//log.Printf("DEBUG [startElection] server %d ENTER term=%d", rf.me, term)
 	rf.becomeCandidate()
 	electionDeadline := rf.nextElectionTimeout
 	peerCount := len(rf.peers)
@@ -139,10 +139,10 @@ func (rf *Raft) startElection(term int) {
 			}
 
 			if ok {
-				log.Printf("DEBUG server %d send RequestVote to %d term %d", rf.me, server, args.Term)
+				//log.Printf("DEBUG server %d send RequestVote to %d term %d", rf.me, server, args.Term)
 				voteCh <- reply
 			} else {
-				log.Printf("DEBUG server %d send RequestVote to %d term %d failed", rf.me, server, args.Term)
+				//log.Printf("DEBUG server %d send RequestVote to %d term %d failed", rf.me, server, args.Term)
 				voteCh <- nil
 			}
 
@@ -177,7 +177,7 @@ func (rf *Raft) startElection(term int) {
 		select {
 		case <-stopCh:
 			// Timeout Stop election, exit
-			log.Printf("DEBUG server %d election TIMEOUT term %d", rf.me, args.Term)
+			//log.Printf("DEBUG server %d election TIMEOUT term %d", rf.me, args.Term)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if rf.state == Candidate && rf.currentTerm == args.Term {
@@ -207,7 +207,7 @@ func (rf *Raft) startElection(term int) {
 			}
 
 			votesReceived++
-			log.Printf("DEBUG [startElection] server %d got vote, total=%d need=%d", rf.me, votesReceived, majority)
+			//log.Printf("DEBUG [startElection] server %d got vote, total=%d need=%d", rf.me, votesReceived, majority)
 			if votesReceived >= majority {
 				// Close stop channel and stop timer
 				rf.mu.Lock()

@@ -42,7 +42,6 @@ type Raft struct {
 	log               []LogEntry // Log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
 	lastIncludedIndex int        // Snapshot replaces all log entries through and including this index (0 if no snapshot)
 	lastIncludedTerm  int        // Term of the entry at lastIncludedIndex (for PrevLogTerm when log was trimmed)
-	// logTermMap  map[int]LogTermIndex // Map of log term to the first index of the term (for fast lookup)
 
 	// Volatile state on all servers
 	commitIndex  int // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -82,6 +81,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastLogIndex = 0
 	rf.nextElectionTimeout = getNextElectionDeadline()
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

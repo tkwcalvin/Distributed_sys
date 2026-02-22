@@ -10,7 +10,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.votedFor = -1
 	rf.nextElectionTimeout = getNextElectionDeadline()
 	log.Printf("[Term %d] server %d becomes Follower", rf.currentTerm, rf.me)
-	rf.persist(nil)
+	rf.persist(rf.persister.ReadSnapshot())
 }
 
 // becomeCandidate transitions this server to candidate state and starts a new term.
@@ -21,7 +21,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.votedFor = rf.me
 	rf.nextElectionTimeout = getNextElectionDeadline()
 	log.Printf("[Term %d] server %d becomes Candidate", rf.currentTerm, rf.me)
-	rf.persist(nil)
+	rf.persist(rf.persister.ReadSnapshot())
 
 }
 
@@ -36,10 +36,11 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = next
 		rf.matchIndex[i] = 0
 	}
+	rf.matchIndex[rf.me] = rf.lastLogIndex
 	nextCopy := make([]int, len(rf.nextIndex))
 	copy(nextCopy, rf.nextIndex)
-	log.Printf("DEBUG [becomeLeader] server %d term %d: nextIdx=%v commitIdx=%d lastLogIdx=%d",
-		rf.me, rf.currentTerm, nextCopy, rf.commitIndex, rf.lastLogIndex)
-	rf.persist(nil)
+	// log.Printf("DEBUG [becomeLeader] server %d term %d: nextIdx=%v commitIdx=%d lastLogIdx=%d",
+	// 	rf.me, rf.currentTerm, nextCopy, rf.commitIndex, rf.lastLogIndex)
+	rf.persist(rf.persister.ReadSnapshot())
 	go rf.replicateLog()
 }

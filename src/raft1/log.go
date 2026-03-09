@@ -58,7 +58,8 @@ func (rf *Raft) replicateLog() {
 			go rf.NotifyLogReplication(server, &once, stopCh)
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		// Short interval so new entries replicate quickly; test requires ~33ms/op.
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -251,8 +252,11 @@ func (rf *Raft) applier() {
 			rf.mu.Lock()
 		}
 		rf.mu.Unlock()
-		time.Sleep(100 * time.Millisecond)
+		// Short sleep so we apply and notify quickly; test requires ~3 ops per 100ms.
+		time.Sleep(10 * time.Millisecond)
 	}
+	log.Printf("[Raft %d] applier exiting (killed), closing applyCh", rf.me)
+	close(rf.applyCh)
 }
 
 // AppendEntries RPC arguments structure.

@@ -61,10 +61,3 @@ func (rf *Raft) readPersist(data []byte) {
 	//log.Printf("DEBUG [readPersist] server %d restored term=%d votedFor=%d logLen=%d", rf.me, currentTerm, votedFor, rf.lastLogIndex+1)
 
 }
-
-// how many bytes in Raft's persisted log?
-func (rf *Raft) PersistBytes() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.persister.RaftStateSize()
-}

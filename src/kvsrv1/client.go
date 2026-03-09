@@ -35,7 +35,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	reply := rpc.GetReply{}
 	for {
 		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
-		if ok && reply.Err != rpc.ErrVersion {
+		if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey) {
 			break
 		}
 		log.Println("Get resending")

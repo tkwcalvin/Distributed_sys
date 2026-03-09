@@ -1,11 +1,13 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"log"
+	"time"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
@@ -32,7 +34,33 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{Key: key}
+	reply := rpc.GetReply{}
+
+	leader := 0
+	for {
+		// find the leader server
+		for {
+			ok := ck.clnt.Call(ck.servers[leader], "KVServer.Get", &args, &reply)
+			if !ok {
+				time.Sleep(10 * time.Millisecond)
+				leader = (leader + 1) % len(ck.servers)
+				continue
+			}
+
+			if reply.Err != rpc.ErrWrongLeader {
+				break
+			}
+			leader = (leader + 1) % len(ck.servers)
+		}
+
+		if reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey {
+			break
+		}
+	}
+	// Log what gets recorded in history (for linearizability debugging)
+	log.Printf("[HISTORY] Get key=%s -> value=%q version=%d err=%s", key, reply.Value, reply.Version, reply.Err)
+	return reply.Value, reply.Version, reply.Err
 }
 
 // Put updates key with value only if the version in the
@@ -53,6 +81,35 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	reply := rpc.PutReply{}
+
+	leader := 0
+	// resend = true only after RPC failed (!ok). ErrWrongLeader means we never reached the leader, so no "maybe succeeded".
+	isResend := false
+	for {
+		ok := ck.clnt.Call(ck.servers[leader], "KVServer.Put", &args, &reply)
+		if !ok {
+			isResend = true // once set, never clear: we might have applied before reply was lost
+			leader = (leader + 1) % len(ck.servers)
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if reply.Err != rpc.ErrWrongLeader {
+			break
+		}
+		// Do not set isResend = false here: we may have had !ok earlier, so keep resend semantics
+		leader = (leader + 1) % len(ck.servers)
+	}
+
+	var ret rpc.Err
+	if !isResend {
+		ret = reply.Err
+	} else if reply.Err == rpc.ErrVersion {
+		ret = rpc.ErrMaybe
+	} else {
+		ret = reply.Err
+	}
+	log.Printf("[HISTORY] Put key=%s value=%q version=%d -> err=%s (isResend=%v replyErr=%s)", key, value, version, ret, isResend, reply.Err)
+	return ret
 }

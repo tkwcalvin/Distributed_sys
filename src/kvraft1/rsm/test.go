@@ -2,15 +2,15 @@ package rsm
 
 import (
 	//"log"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
-	"fmt"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 type Test struct {
@@ -72,10 +72,12 @@ func (ts *Test) onePartition(p []int, req any) any {
 		ts.mu.Lock()
 		index := ts.leader
 		ts.mu.Unlock()
+		//triedAny := false
 		for range ts.srvs {
 			if ts.g.IsConnected(index) {
 				s := ts.srvs[index]
 				if s.rsm != nil && inPartition(index, p) {
+					//triedAny = true
 					err, rep := s.rsm.Submit(req)
 					if err == rpc.OK {
 						ts.mu.Lock()
@@ -88,6 +90,10 @@ func (ts *Test) onePartition(p []int, req any) any {
 			}
 			index = (index + 1) % len(ts.srvs)
 		}
+		// All servers disconnected (e.g. after Shutdown); give up so goroutines can exit.
+		// if !triedAny {
+		// 	return nil
+		// }
 		time.Sleep(50 * time.Millisecond)
 		//log.Printf("try again: no leader")
 	}

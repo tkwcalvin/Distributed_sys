@@ -83,3 +83,30 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
+
+// how many bytes in Raft's persisted log?
+func (rf *Raft) PersistBytes() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index > rf.lastLogIndex {
+		return
+	}
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[rf.getIndexAfterCompaction(index)].Term
+	rf.log = rf.log[rf.getIndexAfterCompaction(index):]
+	rf.persist(snapshot)
+	// print the snapshot data length
+	//log.Printf("DEBUG [Snapshot] server %d term %d snapshot data length %d", rf.me, rf.currentTerm, len(rf.persister.ReadSnapshot()))
+
+}

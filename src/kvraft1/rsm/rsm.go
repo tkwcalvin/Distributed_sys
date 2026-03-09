@@ -10,7 +10,6 @@
 package rsm
 
 import (
-	"log"
 	"sync"
 	"time"
 
@@ -126,7 +125,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	rsm.mu.Unlock()
 	index, term, ok := rsm.rf.Start(op)
 	if !ok {
-		log.Printf("[RSM %d] Submit Start !ok -> ErrWrongLeader", rsm.me)
 		return rpc.ErrWrongLeader, nil
 	}
 
@@ -150,18 +148,13 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	for {
 		select {
 		case r := <-ch:
-			// Result for this index; verify counter in case index was reused after restart.
 			if r.counter != counter {
-				log.Printf("[RSM %d] Submit index=%d counter mismatch -> ErrWrongLeader", rsm.me, index)
 				return rpc.ErrWrongLeader, nil
 			}
 			return rpc.OK, r.opres
 		case <-rsm.doneCh:
-			// Reader exited (e.g. Raft Kill closed applyCh); this node is done.
-			log.Printf("[RSM %d] Submit doneCh closed -> ErrWrongLeader", rsm.me)
 			return rpc.ErrWrongLeader, nil
 		case <-time.After(10 * time.Millisecond):
-			// If term increased or we're no longer leader, give up.
 			currentTerm, isLeader := rsm.rf.GetState()
 			if currentTerm > term || !isLeader {
 				return rpc.ErrWrongLeader, nil
@@ -173,32 +166,22 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 // reader consumes applyCh, runs DoOp for each committed entry, and delivers
 // the result only to the Submit that is waiting for that index (via pending map).
 func (rsm *RSM) reader() {
-	defer func() {
-		log.Printf("[RSM %d] reader exiting, closing doneCh", rsm.me)
-		close(rsm.doneCh)
-	}()
+	defer close(rsm.doneCh)
 	for msg := range rsm.applyCh {
 		if !msg.CommandValid {
 			continue
 		}
 		op := msg.Command.(Op)
 		res := rsm.sm.DoOp(op.Req)
-		// Deliver whenever we apply (leader or follower). The op was committed and
-		// applied; the waiter, if any, is the Submit that called Start() on this
-		// server for this index, so the result is for them. No need to check isLeader.
 		r := result{counter: op.Id, index: msg.CommandIndex, opres: res}
 		rsm.mu.Lock()
 		pw := rsm.pending[msg.CommandIndex]
 		if pw != nil && pw.counter == op.Id {
 			delete(rsm.pending, msg.CommandIndex)
-			// Copy ch so we can unlock before send. We must not hold rsm.mu across
-			// "ch <- r": the receiver (Submit) will run its defer and take rsm.mu;
-			// holding the lock here would deadlock.
 			ch := pw.ch
 			rsm.mu.Unlock()
-			ch <- r // buffer 1: does not block if Submit already returned
+			ch <- r
 		} else {
-			// No waiter or counter mismatch (e.g. index reused after restart); drop.
 			rsm.mu.Unlock()
 		}
 	}

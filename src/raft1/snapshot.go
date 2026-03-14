@@ -33,6 +33,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
+
+	// Leader's snapshot is older than or equal to ours; discard it and reply success
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
+	}
+
 	rf.persist(args.Data)
 	if args.LastIncludedIndex <= rf.lastLogIndex &&
 		rf.log[rf.getIndexAfterCompaction(args.LastIncludedIndex)].Term == args.LastIncludedTerm {

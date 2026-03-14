@@ -49,7 +49,7 @@ type StateMachine interface {
 // ch has buffer 1 so that if the Submit has already returned (e.g. timeout),
 // the reader's send doesn't block.
 type pendingWaiter struct {
-	counter int       // op.Id for this request; disambiguates same index after restart
+	counter int // op.Id for this request; disambiguates same index after restart
 	ch      chan result
 }
 
@@ -104,6 +104,10 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
+	}
+	// Restore state machine from persisted snapshot on startup (e.g. after crash).
+	if data := persister.ReadSnapshot(); len(data) > 0 {
+		sm.Restore(data)
 	}
 	go rsm.reader()
 	return rsm
@@ -168,6 +172,10 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 func (rsm *RSM) reader() {
 	defer close(rsm.doneCh)
 	for msg := range rsm.applyCh {
+		if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+			continue
+		}
 		if !msg.CommandValid {
 			continue
 		}
@@ -175,6 +183,10 @@ func (rsm *RSM) reader() {
 		res := rsm.sm.DoOp(op.Req)
 		r := result{counter: op.Id, index: msg.CommandIndex, opres: res}
 		rsm.mu.Lock()
+		// Snapshot if log grows too big
+		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() > rsm.maxraftstate*4/5 {
+			rsm.rf.Snapshot(r.index, rsm.sm.Snapshot())
+		}
 		pw := rsm.pending[msg.CommandIndex]
 		if pw != nil && pw.counter == op.Id {
 			delete(rsm.pending, msg.CommandIndex)
@@ -184,5 +196,6 @@ func (rsm *RSM) reader() {
 		} else {
 			rsm.mu.Unlock()
 		}
+
 	}
 }

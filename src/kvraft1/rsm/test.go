@@ -1,7 +1,6 @@
 package rsm
 
 import (
-	//"log"
 	"fmt"
 	"sync"
 	"testing"
@@ -83,7 +82,6 @@ func (ts *Test) onePartition(p []int, req any) any {
 						ts.mu.Lock()
 						ts.leader = index
 						ts.mu.Unlock()
-						//log.Printf("leader = %d", ts.leader)
 						return rep
 					}
 				}
@@ -95,7 +93,6 @@ func (ts *Test) onePartition(p []int, req any) any {
 		// 	return nil
 		// }
 		time.Sleep(50 * time.Millisecond)
-		//log.Printf("try again: no leader")
 	}
 	return nil
 }
@@ -149,13 +146,11 @@ func (ts *Test) countValue(v int) int {
 }
 
 func (ts *Test) disconnectLeader() int {
-	//log.Printf("disconnect %d", ts.leader)
 	ts.g.DisconnectAll(ts.leader)
 	return ts.leader
 }
 
 func (ts *Test) connect(i int) {
-	//log.Printf("connect %d", i)
 	ts.g.ConnectOne(i)
 }
 

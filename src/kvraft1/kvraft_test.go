@@ -2,7 +2,7 @@ package kvraft
 
 import (
 	"fmt"
-	//"log"
+	"log"
 	"strconv"
 	"testing"
 	"time"
@@ -46,16 +46,20 @@ func (ts *Test) GenericTest() {
 		default_key = kvtest.MakeKeys(NKEYS)
 	}
 	for i := 0; i < NITER; i++ {
-		// log.Printf("Iteration %v\n", i)
+		iter := i
+		log.Printf("[TEST] GenericTest: iter %d start", iter)
 
 		go func() {
+			log.Printf("[TEST] GenericTest: iter %d SpawnClientsAndWait start", iter)
 			rs := ts.SpawnClientsAndWait(ts.nclients, T, func(cli int, ck kvtest.IKVClerk, done chan struct{}) kvtest.ClntRes {
 				return ts.OneClientPut(cli, ck, default_key, done)
 			})
+			log.Printf("[TEST] GenericTest: iter %d SpawnClientsAndWait done", iter)
 			if !ts.randomkeys {
 				reliable := ts.IsReliable() && !ts.crash && !ts.partitions
 				ts.CheckPutConcurrent(ck, default_key[0], rs, &res, reliable)
 			}
+			log.Printf("[TEST] GenericTest: iter %d CheckPutConcurrent done, sending ch_spawn", iter)
 			ch_spawn <- struct{}{}
 		}()
 
@@ -65,18 +69,23 @@ func (ts *Test) GenericTest() {
 			go ts.Partitioner(Gid, ch_partitioner)
 		}
 
+		log.Printf("[TEST] GenericTest: iter %d waiting for ch_spawn (clients+check done)", iter)
 		<-ch_spawn // wait for clients to be done
+		log.Printf("[TEST] GenericTest: iter %d got ch_spawn", iter)
 
 		if i == NITER-1 {
 			tester.SetAnnotationFinalized()
 		}
 
+		log.Printf("[TEST] GenericTest: iter %d CheckPorcupine start", iter)
 		ts.CheckPorcupine()
+		log.Printf("[TEST] GenericTest: iter %d CheckPorcupine done", iter)
 
 		if ts.partitions {
+			log.Printf("[TEST] GenericTest: iter %d stopping partitioner", iter)
 			ch_partitioner <- true
-			//log.Printf("wait for partitioner\n")
 			<-ch_partitioner
+			log.Printf("[TEST] GenericTest: iter %d partitioner stopped", iter)
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term

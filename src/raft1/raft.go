@@ -102,6 +102,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if index > rf.lastLogIndex {
 		return
 	}
+	// Already compacted past this index (e.g. via InstallSnapshot); do not overwrite with older snapshot
+	if index <= rf.lastIncludedIndex {
+		return
+	}
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[rf.getIndexAfterCompaction(index)].Term
 	rf.log = rf.log[rf.getIndexAfterCompaction(index):]

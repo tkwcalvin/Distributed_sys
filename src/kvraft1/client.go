@@ -38,9 +38,14 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	reply := rpc.GetReply{}
 
 	leader := 0
+	lastStuckLog := time.Now()
 	for {
 		// find the leader server
 		for {
+			if time.Since(lastStuckLog) > 5*time.Second {
+				log.Printf("[TEST] Clerk Get key=%s retrying >5s (no OK/ErrNoKey yet, leader=%d)", key, leader)
+				lastStuckLog = time.Now()
+			}
 			ok := ck.clnt.Call(ck.servers[leader], "KVServer.Get", &args, &reply)
 			if !ok {
 				time.Sleep(10 * time.Millisecond)
@@ -85,12 +90,18 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	reply := rpc.PutReply{}
 
 	leader := 0
-	// resend = true only after RPC failed (!ok). ErrWrongLeader means we never reached the leader, so no "maybe succeeded".
+	// isResend = true if we might have already applied (reply lost or ErrWrongLeader after apply).
+	// Then on ErrVersion we return ErrMaybe so the test counts this put in Nmaybe (server version <= Nok+Nmaybe).
 	isResend := false
+	lastStuckLog := time.Now()
 	for {
+		if time.Since(lastStuckLog) > 5*time.Second {
+			log.Printf("[TEST] Clerk Put key=%s ver=%d retrying >5s (no OK/ErrVersion yet, leader=%d)", key, version, leader)
+			lastStuckLog = time.Now()
+		}
 		ok := ck.clnt.Call(ck.servers[leader], "KVServer.Put", &args, &reply)
 		if !ok {
-			isResend = true // once set, never clear: we might have applied before reply was lost
+			isResend = true // reply lost; put might have been applied
 			leader = (leader + 1) % len(ck.servers)
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -98,7 +109,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		if reply.Err != rpc.ErrWrongLeader {
 			break
 		}
-		// Do not set isResend = false here: we may have had !ok earlier, so keep resend semantics
+		// Leader may have applied our put then stepped down before replying; treat as uncertain.
+		isResend = true
 		leader = (leader + 1) % len(ck.servers)
 	}
 

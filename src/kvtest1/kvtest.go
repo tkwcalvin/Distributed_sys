@@ -3,7 +3,7 @@ package kvtest
 import (
 	"encoding/json"
 	"fmt"
-	//"log"
+	"log"
 	"math/rand"
 	"strconv"
 	"testing"
@@ -124,8 +124,10 @@ type ClntRes struct {
 }
 
 func (ts *Test) CheckPutConcurrent(ck IKVClerk, key string, rs []ClntRes, res *ClntRes, reliable bool) {
+	log.Printf("[TEST] CheckPutConcurrent: Get(key=%q) start", key)
 	e := EntryV{}
 	ver0 := ts.GetJson(ck, key, -1, &e)
+	log.Printf("[TEST] CheckPutConcurrent: Get(key=%q) done ver0=%d", key, ver0)
 	for _, r := range rs {
 		res.Nok += r.Nok
 		res.Nmaybe += r.Nmaybe
@@ -152,7 +154,8 @@ type Fclnt func(int, IKVClerk, chan struct{}) ClntRes
 // spawn ncli clients
 func (ts *Test) SpawnClientsAndWait(nclnt int, t time.Duration, fn Fclnt) []ClntRes {
 	ca := make([]chan ClntRes, nclnt)
-	done := make(chan struct{})
+	// Buffered so main can send all done signals without blocking when clients are stuck in Put/Get (e.g. partition).
+	done := make(chan struct{}, nclnt)
 	for cli := 0; cli < nclnt; cli++ {
 		ca[cli] = make(chan ClntRes)
 		go ts.runClient(cli, ca[cli], done, ts.mck, fn)
@@ -161,10 +164,14 @@ func (ts *Test) SpawnClientsAndWait(nclnt int, t time.Duration, fn Fclnt) []Clnt
 	for i := 0; i < nclnt; i++ {
 		done <- struct{}{}
 	}
+	log.Printf("[TEST] SpawnClientsAndWait: sent done to %d clients, waiting for results", nclnt)
 	rs := make([]ClntRes, nclnt)
 	for cli := 0; cli < nclnt; cli++ {
+		log.Printf("[TEST] SpawnClientsAndWait: waiting for client %d/%d", cli, nclnt)
 		rs[cli] = <-ca[cli]
+		log.Printf("[TEST] SpawnClientsAndWait: client %d returned Nok=%d Nmaybe=%d", cli, rs[cli].Nok, rs[cli].Nmaybe)
 	}
+	log.Printf("[TEST] SpawnClientsAndWait: all %d clients returned", nclnt)
 	return rs
 }
 

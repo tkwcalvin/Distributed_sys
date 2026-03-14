@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -90,11 +91,28 @@ func (kv *KVServer) doPut(args rpc.PutArgs) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.db)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	// Your code here
+	if len(data) == 0 {
+		kv.mu.Lock()
+		kv.db = make(map[string]*Entry)
+		kv.mu.Unlock()
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var db map[string]*Entry
+	if d.Decode(&db) != nil {
+		log.Fatalf("kv %d: couldn't decode snapshot db", kv.me)
+	}
+	kv.mu.Lock()
+	kv.db = db
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -147,8 +165,9 @@ func (kv *KVServer) killed() bool {
 // start goroutines for any long-running work.
 func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persister *tester.Persister, maxraftstate int) []tester.IService {
 	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
+	// Go's RPC library to marshall/unmarshall (and for snapshot encode/decode).
 	labgob.Register(rsm.Op{})
+	labgob.Register(Entry{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
 	labgob.Register(rpc.PutReply{})

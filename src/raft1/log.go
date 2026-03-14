@@ -352,6 +352,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	// leader's prev is behind our snapshot; follower has compacted that index (reject so leader sends InstallSnapshot)
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		reply.XTerm = 0
+		reply.XIndex = 0
+		reply.XLen = rf.lastLogIndex + 1
+		return false
+	}
 	// log too short
 	if args.PrevLogIndex > rf.lastLogIndex {
 		reply.XTerm = 0
@@ -366,7 +373,7 @@ func (rf *Raft) checkIfUpdatedLog(args *AppendEntriesArgs, reply *AppendEntriesR
 	if rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term != args.PrevLogTerm {
 		reply.XTerm = rf.log[rf.getIndexAfterCompaction(args.PrevLogIndex)].Term
 		reply.XIndex = args.PrevLogIndex
-		for reply.XIndex > 0 && rf.log[rf.getIndexAfterCompaction(reply.XIndex-1)].Term == reply.XTerm {
+		for reply.XIndex > rf.lastIncludedIndex && rf.log[rf.getIndexAfterCompaction(reply.XIndex-1)].Term == reply.XTerm {
 			reply.XIndex--
 		}
 		// log.Printf("DEBUG [AE reject] follower %d <- leader %d: term mismatch at prevIdx=%d (have %d want %d), XTerm=%d XIdx=%d",

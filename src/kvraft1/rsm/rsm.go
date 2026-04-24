@@ -10,6 +10,7 @@
 package rsm
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -53,6 +54,12 @@ type pendingWaiter struct {
 	ch      chan result
 }
 
+// clientSeq is the key for idempotent dedup: same (ClientId, SeqNum) applied only once.
+type clientSeq struct {
+	ClientId int
+	SeqNum   int
+}
+
 type RSM struct {
 	mu           sync.Mutex
 	me           int
@@ -65,9 +72,12 @@ type RSM struct {
 	//          sends only to that waiter's ch, so concurrency is unbounded.
 	// doneCh: closed when reader exits (e.g. Raft Kill closed applyCh); all
 	//         waiting Submits then return ErrWrongLeader.
-	counter int
-	pending map[int]*pendingWaiter
-	doneCh  chan struct{}
+	counter     int
+	pending     map[int]*pendingWaiter
+	doneCh      chan struct{}
+	lastApplied int // last applied index
+	// idempotent dedup: (clientId, seqNum) -> result already applied (Op.Me, Op.Id).
+	appliedResults map[clientSeq]any
 }
 
 // servers[] contains the ports of the set of
@@ -95,12 +105,13 @@ type result struct {
 
 func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, maxraftstate int, sm StateMachine) *RSM {
 	rsm := &RSM{
-		me:           me,
-		maxraftstate: maxraftstate,
-		applyCh:      make(chan raftapi.ApplyMsg),
-		sm:           sm,
-		pending:      make(map[int]*pendingWaiter),
-		doneCh:       make(chan struct{}),
+		me:             me,
+		maxraftstate:   maxraftstate,
+		applyCh:        make(chan raftapi.ApplyMsg),
+		sm:             sm,
+		pending:        make(map[int]*pendingWaiter),
+		doneCh:         make(chan struct{}),
+		appliedResults: make(map[clientSeq]any),
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -180,12 +191,32 @@ func (rsm *RSM) reader() {
 			continue
 		}
 		op := msg.Command.(Op)
-		res := rsm.sm.DoOp(op.Req)
-		r := result{counter: op.Id, index: msg.CommandIndex, opres: res}
+		// Idempotent dedup: (clientId, seqNum) = (Op.Me, Op.Id); apply at most once per (clientId, seqNum).
+		key := clientSeq{ClientId: op.Me, SeqNum: op.Id}
+		var res any
 		rsm.mu.Lock()
-		// Snapshot if log grows too big
+		if cached, ok := rsm.appliedResults[key]; ok {
+			res = cached
+		} else {
+			rsm.mu.Unlock()
+			// [LIN] log apply order for linearizability debugging (put-after-get returning stale value)
+			switch req := op.Req.(type) {
+			case rpc.GetArgs:
+				log.Printf("[LIN] RSM me=%d apply index=%d Get key=%s", rsm.me, msg.CommandIndex, req.Key)
+			case rpc.PutArgs:
+				log.Printf("[LIN] RSM me=%d apply index=%d Put key=%s ver=%d", rsm.me, msg.CommandIndex, req.Key, req.Version)
+			}
+			res = rsm.sm.DoOp(op.Req)
+			rsm.mu.Lock()
+			rsm.appliedResults[key] = res
+		}
+		r := result{counter: op.Id, index: msg.CommandIndex, opres: res}
+		var snapshotData []byte
 		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() > rsm.maxraftstate*4/5 {
-			rsm.rf.Snapshot(r.index, rsm.sm.Snapshot())
+			snapshotData = rsm.sm.Snapshot()
+		}
+		if snapshotData != nil {
+			rsm.rf.Snapshot(r.index, snapshotData)
 		}
 		pw := rsm.pending[msg.CommandIndex]
 		if pw != nil && pw.counter == op.Id {

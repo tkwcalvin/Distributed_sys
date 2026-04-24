@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,10 +46,11 @@ type IClerkMaker interface {
 
 type Test struct {
 	*tester.Config
-	t          *testing.T
-	oplog      *OpLog
-	mck        IClerkMaker
-	randomkeys bool
+	t            *testing.T
+	oplog        *OpLog
+	mck          IClerkMaker
+	randomkeys   bool
+	drainTimeouts atomic.Int32 // count of clients that returned on done without in-flight op completing
 }
 
 func MakeTest(t *testing.T, cfg *tester.Config, randomkeys bool, mck IClerkMaker) *Test {
@@ -214,6 +216,7 @@ type EntryV struct {
 // tryint to put to the same key
 func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Tversion) (rpc.Tversion, bool) {
 	for true {
+		log.Printf("[TEST] OnePut start cli=%d key=%s ver=%d (client may block in Put/Get below)", me, key, ver)
 		err := ts.PutJson(ck, key, EntryV{me, ver}, ver, me)
 		if !(err == rpc.OK || err == rpc.ErrVersion || err == rpc.ErrMaybe) {
 			ts.Fatalf("Wrong error %v", err)
@@ -263,31 +266,63 @@ func (ts *Test) Partitioner(gid tester.Tgid, ch chan bool) {
 }
 
 // One of perhaps many clients doing OnePut's until done signal.
+// Run each OnePut in a goroutine so we can exit when done is received; when done is
+// received we wait up to doneDrainTimeout for the in-flight OnePut to complete so
+// its Put/Get get logged to the shared opLog (otherwise history is incomplete and
+// Porcupine reports "not linearizable").
+const doneDrainTimeout = 10 * time.Second
+
 func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct{}) ClntRes {
 	res := ClntRes{}
 	verm := make(map[string]rpc.Tversion)
 	for _, k := range ka {
 		verm[k] = rpc.Tversion(0)
 	}
-	ok := false
-	for true {
+	for {
 		select {
 		case <-done:
+			log.Printf("[TEST] OneClientPut cli=%d received done, returning Nok=%d Nmaybe=%d", cli, res.Nok, res.Nmaybe)
 			return res
 		default:
 			k := ka[0]
 			if ts.randomkeys {
 				k = ka[rand.Int()%len(ka)]
 			}
-			verm[k], ok = ts.OnePut(cli, ck, k, verm[k])
-			if ok {
-				res.Nok += 1
-			} else {
-				res.Nmaybe += 1
+			onePutDone := make(chan struct{})
+			var putVer rpc.Tversion
+			var putOk bool
+			go func() {
+				putVer, putOk = ts.OnePut(cli, ck, k, verm[k])
+				close(onePutDone)
+			}()
+			select {
+			case <-done:
+				// Drain in-flight op so its Put/Get are logged before we return (keeps history complete).
+			select {
+			case <-onePutDone:
+					verm[k] = putVer
+					if putOk {
+						res.Nok++
+					} else {
+						res.Nmaybe++
+					}
+				case <-time.After(doneDrainTimeout):
+					// Timeout: return anyway so test doesn't hang; history may be incomplete.
+					ts.drainTimeouts.Add(1)
+					log.Printf("[LIN] OneClientPut cli=%d DRAIN TIMEOUT (in-flight Put/Get not logged; history may be incomplete)", cli)
+				}
+				log.Printf("[TEST] OneClientPut cli=%d received done, returning Nok=%d Nmaybe=%d", cli, res.Nok, res.Nmaybe)
+				return res
+			case <-onePutDone:
+				verm[k] = putVer
+				if putOk {
+					res.Nok++
+				} else {
+					res.Nmaybe++
+				}
 			}
 		}
 	}
-	return res
 }
 
 func MakeKeys(n int) []string {
